@@ -23,7 +23,7 @@ except ImportError:
 from telethon import TelegramClient, events, utils, Button
 from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
 from telethon.network import ConnectionTcpFull
-from telethon.errors import UserNotParticipantError, ForbiddenError
+from telethon.errors import UserNotParticipantError, ForbiddenError, WebpageMediaEmptyError
 from telethon.tl.functions.channels import GetParticipantRequest, GetFullChannelRequest
 import yt_dlp
 
@@ -141,7 +141,6 @@ async def check_subscription(user_id):
             continue
     return True
 
-# --- [تحديث] كليشة الرفع السينمائية المحسنة ⚡️ ---
 async def progress_bar(current, total, event, start_time, action="الرفع", task_id=None):
     now = time.time()
     diff = now - start_time
@@ -154,11 +153,9 @@ async def progress_bar(current, total, event, start_time, action="الرفع", t
     speed_mb = speed / (1024 * 1024)
     elapsed_time = round(diff)
     
-    # حساب الوقت المتبقي التقديري
     remaining_bytes = total - current
     eta = round(remaining_bytes / speed) if speed > 0 else 0
     
-    # تصميم شريط تقدم احترافي متدرج
     filled_len = int(12 * current // total)
     bar = '🎬' * filled_len + '▫️' * (12 - filled_len)
     
@@ -252,7 +249,6 @@ async def recognize_audio_logic(file_path):
         logger.error(f"Error in recognition logic: {e}")
     return {"found": False}
 
-# --- [تحديث] كليشة ترحيب سينمائية احترافية ---
 @bot.on(events.NewMessage(pattern='/start'))
 async def start(event):
     user_id = event.sender_id
@@ -354,7 +350,6 @@ async def start(event):
 @bot.on(events.NewMessage(pattern='/admin'))
 async def admin_panel(event):
     if event.sender_id != DEV_ID: return
-    # تنظيف حالة الإلغاء للمطور لضمان عمل اللوحة بشكل سليم
     cancelled_conversations.discard(event.sender_id)
     admin_welcome = (
         f"**🛠 لوحة تحكم الإدارة العليا | Master Control**\n"
@@ -383,35 +378,25 @@ async def callback_handler(event):
     data = event.data.decode('utf-8')
     u_id = event.sender_id
     
-    # --- نظام كسر المحادثة الجذري والقفل البرمجي ---
     if data == "back_to_admin" or data == "cancel_all_waiting":
         try:
-            # تفعيل القفل لمنع البوت من "التقاط" أي رسالة إذاعة تم إرسالها بعد الإلغاء
             cancelled_conversations.add(u_id)
-            
-            # إنهاء الجلسات
             for conv in bot._conversations.get(event.chat_id, []):
                 conv.cancel()
-                
-            # إرسال إشارة إلغاء لكافة مهام الإذاعة النشطة
             for bc_id in list(broadcast_tasks.keys()):
                 broadcast_tasks[bc_id].cancel()
                 del broadcast_tasks[bc_id]
-            logger.info(f"✅ تم تفعيل القفل وإنهاء الجلسات للمستخدم: {u_id}")
         except Exception as e:
             logger.error(f"خطأ أثناء كسر جلسات الانتظار: {e}")
-        
         await event.answer("🔄 تم إلغاء الانتظار والرجوع للوحة", alert=False)
         await admin_panel_edit(event)
         return
 
-    # --- نظام الحذف العميق للإذاعة عند الإلغاء ---
     if data.startswith("cancel_bc_"):
         bc_task_id = data.replace("cancel_", "")
         if bc_task_id in broadcast_tasks:
             broadcast_tasks[bc_task_id].cancel()
             del broadcast_tasks[bc_task_id]
-            logger.warning(f"🛑 تم تفعيل الحذف العميق للإذاعة: {bc_task_id}")
             await event.edit("⚠️ **تم إيقاف الإذاعة فوراً وحذف المهمة من النظام.**")
             return await event.answer("تم الحذف العميق", alert=True)
 
@@ -419,7 +404,6 @@ async def callback_handler(event):
         t_id = data.split("_")[1]
         if t_id in active_tasks:
             active_tasks[t_id].cancel()
-            logger.warning(f"⚠️ تم إلغاء المهمة: {t_id}")
             await event.edit("✅ **تم إلغاء عملية التحميل بنجاح.**")
             return await event.answer("تم الإلغاء", alert=True)
         else:
@@ -445,58 +429,36 @@ async def callback_handler(event):
         
         parts = data.split("_")
         mode = parts[1] 
-        
         reply_msg = await event.get_message()
         if not reply_msg: return await event.answer("❌ خطأ في البيانات.", alert=True)
-        
-        # --- استخراج الرابط ---
         url = None
         url_match = re.search(r'(https?://[^\s]+)', reply_msg.text or "")
         if url_match:
             url = url_match.group(1)
-        
         if not url and reply_msg.reply_to_msg_id:
             orig_msg = await reply_msg.get_reply_message()
             if orig_msg and orig_msg.text:
                 url_match = re.search(r'(https?://[^\s]+)', orig_msg.text)
                 if url_match:
                     url = url_match.group(1)
-        
-        if not url and reply_msg.buttons:
-            for row in reply_msg.buttons:
-                for btn in row:
-                    if btn.url:
-                        url = btn.url
-                        break
-
         if not url: return await event.answer("❌ الرابط مفقود في نص الرسالة.", alert=True)
-        
-        orig_id = None
-        if reply_msg.reply_to_msg_id:
-            orig_id = reply_msg.reply_to_msg_id
-
         await event.delete() 
         task_id = str(event.id)
-        task = asyncio.create_task(process_youtube_download(event, url, task_id, mode, orig_id))
+        task = asyncio.create_task(process_youtube_download(event, url, task_id, mode))
         active_tasks[task_id] = task
         return
 
-    # --- معالجة أزرار تصفح البحث ---
     if data.startswith("search_next") or data.startswith("search_prev"):
         if u_id not in search_results:
             return await event.answer("⚠️ انتهت جلسة البحث، ابحث من جديد.", alert=True)
-        
         if data == "search_next":
             if search_results[u_id]["current"] < len(search_results[u_id]["results"]) - 1:
                 search_results[u_id]["current"] += 1
-            else:
-                return await event.answer("هذه هي النتيجة الأخيرة.", alert=True)
+            else: return await event.answer("هذه هي النتيجة الأخيرة.", alert=True)
         else:
             if search_results[u_id]["current"] > 0:
                 search_results[u_id]["current"] -= 1
-            else:
-                return await event.answer("هذه هي النتيجة الأولى.", alert=True)
-        
+            else: return await event.answer("هذه هي النتيجة الأولى.", alert=True)
         await update_search_ui(event)
         return
 
@@ -507,7 +469,6 @@ async def callback_handler(event):
         files_count = len(glob.glob("downloads/*"))
         total_uses = sum(db["user_stats"].values())
         top_user = max(db["user_stats"], key=db["user_stats"].get) if db["user_stats"] else "لا يوجد"
-        
         stats_text = (
             f"**📊 إحصائيات النظام الشاملة:**\n"
             f"**━━━━━━━━━━━━━━━━━━**\n"
@@ -567,21 +528,18 @@ async def callback_handler(event):
                     buttons=[Button.inline("🔙 إلغاء والرجوع للوحة", "back_to_admin")]
                 )
                 msg = await conv.get_response()
-                if not msg.text or msg.text != "/start": 
-                    if msg.photo:
-                        file_path = await bot.download_media(msg.photo, "downloads/")
-                        db[key] = file_path
-                        save_db(db)
-                        await conv.send_message(f"✅ تم تحديث صورة {target} بنجاح.")
-                    elif msg.text and msg.text.startswith("http"):
-                        db[key] = msg.text
-                        save_db(db)
-                        await conv.send_message(f"✅ تم تحديث رابط صورة {target} بنجاح.")
+                if msg.photo:
+                    file_path = await bot.download_media(msg.photo, "downloads/")
+                    db[key] = file_path
+                    save_db(db)
+                    await conv.send_message(f"✅ تم تحديث صورة {target} بنجاح.")
+                elif msg.text and msg.text.startswith("http"):
+                    db[key] = msg.text
+                    save_db(db)
+                    await conv.send_message(f"✅ تم تحديث رابط صورة {target} بنجاح.")
                 await admin_panel(event)
-            except Exception:
-                await admin_panel(event)
-            finally:
-                await conv.cancel_all()
+            except Exception: await admin_panel(event)
+            finally: await conv.cancel_all()
 
     elif data == "add_ch":
         await event.answer()
@@ -597,10 +555,8 @@ async def callback_handler(event):
                     save_db(db)
                     await conv.send_message("✅ تمت إضافة القناة بنجاح.")
                 await admin_panel(event)
-            except Exception:
-                await admin_panel(event)
-            finally:
-                await conv.cancel_all()
+            except Exception: await admin_panel(event)
+            finally: await conv.cancel_all()
 
     elif data == "del_ch":
         await event.answer()
@@ -612,17 +568,10 @@ async def callback_handler(event):
     elif data == "bc_settings":
         await event.answer()
         cancelled_conversations.discard(u_id)
-        buttons = [
-            [Button.inline("👤 إذاعة خاص (Users)", "bc_users"), Button.inline("📺 إذاعة قنوات (Channels)", "bc_channels")],
-            [Button.inline("🔙 رجوع للوحة التحكم", "back_to_admin")]
-        ]
-        txt = (
-            f"**📣 نظام التبليغ والإذاعة الذكي | Broadcast**\n"
-            f"**━━━━━━━━━━━━━━━━━━**\n"
-            f"**• يدعم (النصوص، الصور، الفيديوهات، والملفات).**\n"
-            f"**• يتضمن نظام حماية ضد التعليق وإمكانية الإلغاء.**\n\n"
-            f"**⚙️ اختر الفئة المستهدفة للتبليغ:**"
-        )
+        buttons = [[Button.inline("👤 إذاعة خاص (Users)", "bc_users"), Button.inline("📺 إذاعة قنوات (Channels)", "bc_channels")],[Button.inline("🔙 رجوع للوحة التحكم", "back_to_admin")]]
+        txt = (f"**📣 نظام التبليغ والإذاعة الذكي | Broadcast**\n"
+               f"**━━━━━━━━━━━━━━━━━━**\n"
+               f"**⚙️ اختر الفئة المستهدفة للتبليغ:**")
         try: await admin_panel_edit(event, txt, buttons=buttons)
         except: pass
 
@@ -634,54 +583,36 @@ async def callback_handler(event):
         await event.delete()
         async with bot.conversation(event.chat_id, timeout=300) as conv:
             try:
-                ask_msg = await conv.send_message(
-                    f"**✏️ ارسل الآن محتوى الإذاعة الموجه لـ {target_label}:**", 
-                    buttons=[Button.inline("🔙 إلغاء والرجوع للوحة", "cancel_all_waiting")]
-                )
+                ask_msg = await conv.send_message(f"**✏️ ارسل الآن محتوى الإذاعة الموجه لـ {target_label}:**", buttons=[Button.inline("🔙 إلغاء والرجوع للوحة", "cancel_all_waiting")])
                 msg = await conv.get_response()
-                
                 if u_id in cancelled_conversations:
                     cancelled_conversations.discard(u_id)
                     return 
-
                 bc_task_id = f"bc_{int(time.time())}"
-                status_bc = await bot.send_message(
-                    event.chat_id,
-                    f"⏳ **جاري النشر...**\n🚀 المهمة: `{bc_task_id}`",
-                    buttons=[[Button.inline("❌ إلغاء وحذف عميق", f"cancel_bc_{bc_task_id}")]]
-                )
-                
+                status_bc = await bot.send_message(event.chat_id, f"⏳ **جاري النشر...**\n🚀 المهمة: `{bc_task_id}`", buttons=[[Button.inline("❌ إلغاء وحذف عميق", f"cancel_bc_{bc_task_id}")]] )
                 async def run_broadcast(task_key):
                     count = 0
                     recipients = db["users"] if target_mode == "bc_users" else db["channels"]
                     for r in recipients:
-                        if task_key not in broadcast_tasks:
-                            break
+                        if task_key not in broadcast_tasks: break
                         try:
                             await bot.send_message(r, msg)
                             count += 1
-                            if count % 15 == 0:
-                                await status_bc.edit(f"⏳ جاري النشر: ({count}/{len(recipients)})\n🚀 المهمة: `{task_key}`", buttons=[[Button.inline("❌ إلغاء وحذف عميق", f"cancel_bc_{task_key}")]])
+                            if count % 15 == 0: await status_bc.edit(f"⏳ جاري النشر: ({count}/{len(recipients)})\n🚀 المهمة: `{task_key}`", buttons=[[Button.inline("❌ إلغاء وحذف عميق", f"cancel_bc_{task_key}")]])
                             await asyncio.sleep(0.05)
-                        except asyncio.CancelledError:
-                            break
+                        except asyncio.CancelledError: break
                         except: continue
-                    
                     if task_key in broadcast_tasks:
                         await status_bc.edit(f"✅ اكتملت الإذاعة لـ: {count} وجهة.", buttons=[Button.inline("🔙 رجوع للوحة", "back_to_admin")])
                         del broadcast_tasks[task_key]
-
                 bc_task = asyncio.create_task(run_broadcast(bc_task_id))
                 broadcast_tasks[bc_task_id] = bc_task
-            except Exception:
-                await admin_panel(event)
-            finally:
-                await conv.cancel_all()
+            except Exception: await admin_panel(event)
+            finally: await conv.cancel_all()
 
     elif data == "clean_cache":
         await event.answer()
-        files = glob.glob("downloads/*")
-        for f in files: 
+        for f in glob.glob("downloads/*"): 
             try: os.remove(f)
             except: pass
         try: await admin_panel_edit(event, "**✅ تم تنظيف كافة الملفات المؤقتة بنجاح.**", buttons=[Button.inline("🔙 رجوع للوحة", "back_to_admin")])
@@ -692,11 +623,7 @@ async def callback_handler(event):
         await event.delete()
 
 async def admin_panel_edit(event, text=None, buttons=None):
-    admin_welcome = text or (
-        f"**🛠 لوحة تحكم الإدارة العليا | Master Control**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📟 أهلاً بك سيدي المطور في نظام التحكم الشامل.**"
-    )
+    admin_welcome = text or (f"**🛠 لوحة تحكم الإدارة العليا | Master Control**\n**━━━━━━━━━━━━━━━━━━**\n**📟 أهلاً بك سيدي المطور في نظام التحكم الشامل.**")
     if not buttons:
         n_join = "مفعّل ✅" if db.get("notify_join") else "معطل ❌"
         n_left = "مفعّل ✅" if db.get("notify_left") else "معطل ❌"
@@ -716,96 +643,46 @@ async def admin_panel_edit(event, text=None, buttons=None):
         try: await bot.send_message(event.chat_id, admin_welcome, buttons=buttons)
         except: pass
 
-# --- [تحديث] رسالة فحص وتحميل احترافية ---
 async def process_youtube_download(event, url, task_id, mode="mp3", original_msg_id=None):
     try:
         async with download_semaphore:
             is_tiktok = "tiktok.com" in str(url)
             display_type = "تيك توك" if is_tiktok else ("فيديو" if mode=="mp4" else "صوت")
-            
-            status_msg = await bot.send_message(
-                event.chat_id, 
-                f"⚡️ **جاري فحص الرابط ومعالجة {display_type}...**\n"
-                f"🛰 **السرعة:** `عالية جداً`\n"
-                f"⏳ **انتظر ثوانٍ معدودة...**",
-                buttons=[[Button.inline("❌ إلغاء العملية", f"cancel_{task_id}")]]
-            )
-            
+            status_msg = await bot.send_message(event.chat_id, f"⚡️ **جاري فحص الرابط ومعالجة {display_type}...**\n🛰 **السرعة:** `عالية جداً`\n⏳ **انتظر ثوانٍ معدودة...**", buttons=[[Button.inline("❌ إلغاء العملية", f"cancel_{task_id}")]] )
             if not os.path.exists('downloads'): os.makedirs('downloads', exist_ok=True)
             ydl_opts = get_ydl_opts(task_id, mode)
-            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.to_thread(lambda: ydl.extract_info(url, download=True))
-                title = info.get('title', 'محتوى جديد')
-                performer = info.get('uploader') or "Hyper Developer"
+                title, performer = info.get('title', 'محتوى جديد'), info.get('uploader') or "Hyper Developer"
                 ext = info.get('ext', 'mp3' if mode == 'mp3' else 'mp4')
                 file_path = f"downloads/{task_id}.{ext}"
-                
                 if not os.path.exists(file_path):
-                    found = glob.glob(f"downloads/{task_id}.*")
-                    for f in found:
-                        if not f.endswith('.jpg') and not f.endswith('.aria2'): 
-                            file_path = f; break
-
+                    for f in glob.glob(f"downloads/{task_id}.*"):
+                        if not f.endswith('.jpg') and not f.endswith('.aria2'): file_path = f; break
                 thumbnail_path = f"downloads/thumb_{task_id}.jpg"
-                thumb_url = info.get('thumbnail')
-                if thumb_url:
+                if info.get('thumbnail'):
                     try:
-                        res = requests.get(thumb_url, timeout=5)
+                        res = requests.get(info.get('thumbnail'), timeout=5)
                         with open(thumbnail_path, 'wb') as f: f.write(res.content)
                     except: thumbnail_path = None
-                
-                duration = int(info.get('duration', 0))
-                start_upload_time = time.time()
-                
-                source_btn_label = "🌐 TikTok" if is_tiktok else "🌐 YouTube"
-                
+                duration, start_upload_time = int(info.get('duration', 0)), time.time()
                 await status_msg.edit(f"✅ **اكتمل التحميل بنجاح!**\n🚀 **جاري البدء في الرفع السحابي...**")
-                
                 if mode == "mp3":
-                    await bot.send_file(
-                        event.chat_id, file_path,
-                        thumb=thumbnail_path if thumbnail_path and os.path.exists(thumbnail_path) else None,
-                        buttons=[[Button.url(source_btn_label, url)]], 
-                        attributes=[DocumentAttributeAudio(duration=duration, title=title, performer=performer)],
-                        progress_callback=lambda c, t: progress_bar(c, t, status_msg, start_upload_time, "رفع", task_id)
-                    )
+                    await bot.send_file(event.chat_id, file_path, thumb=thumbnail_path if thumbnail_path and os.path.exists(thumbnail_path) else None, buttons=[[Button.url("🌐 Source", url)]], attributes=[DocumentAttributeAudio(duration=duration, title=title, performer=performer)], progress_callback=lambda c, t: progress_bar(c, t, status_msg, start_upload_time, "رفع", task_id))
                 else:
-                    caption = (
-                        f"**🎬 تم التحميل بنجاح!**\n"
-                        f"**━━━━━━━━━━━━━━━━━━**\n"
-                        f"**📝 العنوان:** {title}\n"
-                        f"**👤 بواسطة:** {performer}\n"
-                        f"**⏱ المدة:** {duration} ثانية\n"
-                        f"**━━━━━━━━━━━━━━━━━━**\n"
-                        f"**📟 المطور:** {DEV_USER}"
-                    )
-                    await bot.send_file(
-                        event.chat_id, file_path,
-                        thumb=thumbnail_path if thumbnail_path and os.path.exists(thumbnail_path) else None,
-                        caption=caption,
-                        buttons=[[Button.url(source_btn_label, url)]],
-                        supports_streaming=True,
-                        attributes=[DocumentAttributeVideo(duration=duration, w=info.get('width', 0), h=info.get('height', 0), supports_streaming=True)],
-                        progress_callback=lambda c, t: progress_bar(c, t, status_msg, start_upload_time, "رفع", task_id)
-                    )
-                
+                    caption = (f"**🎬 تم التحميل بنجاح!**\n**━━━━━━━━━━━━━━━━━━**\n**📝 العنوان:** {title}\n**👤 بواسطة:** {performer}\n**⏱ المدة:** {duration} ثانية\n**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}")
+                    await bot.send_file(event.chat_id, file_path, thumb=thumbnail_path if thumbnail_path and os.path.exists(thumbnail_path) else None, caption=caption, buttons=[[Button.url("🌐 Source", url)]], supports_streaming=True, attributes=[DocumentAttributeVideo(duration=duration, w=info.get('width', 0), h=info.get('height', 0), supports_streaming=True)], progress_callback=lambda c, t: progress_bar(c, t, status_msg, start_upload_time, "رفع", task_id))
                 try:
                     await status_msg.delete()
                     if original_msg_id: await bot.delete_messages(event.chat_id, original_msg_id)
                 except: pass
-                
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logger.error(f"❌ خطأ: {e}")
+    except asyncio.CancelledError: pass
+    except Exception as e: logger.error(f"❌ خطأ: {e}")
     finally:
         if task_id in active_tasks: del active_tasks[task_id]
         for f in glob.glob(f"downloads/*{task_id}*"):
             try: os.remove(f)
             except: pass
-
-# --- [ترتيب معدل] معالجة الروابط أولاً ثم البحث ---
 
 @bot.on(events.NewMessage(pattern=r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+'))
 async def handle_youtube_link(event):
@@ -821,22 +698,16 @@ async def handle_youtube_link(event):
             rec_data = await recognize_audio_logic(f_path)
             if os.path.exists(f_path): os.remove(f_path)
     except: pass
-    
-    format_text = (
-        f"**🎥 تم التعرف على الرابط بنجاح!**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📥 يرجى اختيار صيغة التحميل المفضلة:**\n"
-    )
+    format_text = (f"**🎥 تم التعرف على الرابط بنجاح!**\n**━━━━━━━━━━━━━━━━━━**\n**📥 يرجى اختيار صيغة التحميل المفضلة:**\n")
     buttons = [[Button.inline("🎵 تحميل صوت (MP3)", "dl_mp3_vid"), Button.inline("🎥 تحميل فيديو (MP4)", "dl_mp4_vid")]]
-    if rec_data["found"]:
+    if rec_data.get("found"):
         format_text += f"**🎧 الأغنية المكتشفة:** `{rec_data['full']}`\n"
         buttons.insert(0, [Button.inline(f"⬇️ تحميل الأغنية الأصلية (MP3)", f"shazam_dl_{rec_data['full']}")])
-    
     format_text += f"**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}"
     buttons.append([Button.inline("❌ إلغاء العملية", "close_admin")])
-    
     await wait_msg.delete()
-    await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
+    try: await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
+    except (WebpageMediaEmptyError, Exception): await bot.send_message(event.chat_id, format_text, buttons=buttons, reply_to=event.id)
 
 @bot.on(events.NewMessage(pattern=r'(https?://)?(www\.|vm\.|vt\.)?tiktok\.com/.+'))
 async def handle_tiktok_link(event):
@@ -852,24 +723,17 @@ async def handle_tiktok_link(event):
             rec_data = await recognize_audio_logic(f_path)
             if os.path.exists(f_path): os.remove(f_path)
     except: pass
-    
-    format_text = (
-        f"**💎 تم التعرف على رابط تيك توك!**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📥 اختر كيف تريد تحميل المحتوى:**\n"
-    )
+    format_text = (f"**💎 تم التعرف على رابط تيك توك!**\n**━━━━━━━━━━━━━━━━━━**\n**📥 اختر كيف تريد تحميل المحتوى:**\n")
     buttons = [[Button.inline("🎥 فيديو (بدون علامة)", "tk_mp4_tk"), Button.inline("🎵 صوت فقط (MP3)", "tk_mp3_tk")]]
-    if rec_data["found"]:
+    if rec_data.get("found"):
         format_text += f"**🎧 الأغنية المكتشفة:** `{rec_data['full']}`\n"
         buttons.insert(0, [Button.inline(f"⬇️ تحميل الأغنية الأصلية (MP3)", f"shazam_dl_{rec_data['full']}")])
-    
     format_text += f"**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}"
     buttons.append([Button.inline("❌ إلغاء العملية", "close_admin")])
-    
     await wait_msg.delete()
-    await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
+    try: await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
+    except (WebpageMediaEmptyError, Exception): await bot.send_message(event.chat_id, format_text, buttons=buttons, reply_to=event.id)
 
-# --- [تعديل فلتر البحث] لضمان عدم التقاط الروابط ---
 @bot.on(events.NewMessage(func=lambda e: e.text and not e.text.startswith('/') and not e.text.startswith('http') and not '://' in e.text and not e.text.startswith('تحميل') and not e.text.startswith('تح')))
 async def auto_search_handler(event):
     if event.chat_id in bot._conversations: return
@@ -884,62 +748,36 @@ async def handle_search_command(event):
 async def start_search_engine(event, query):
     user_id = event.sender_id
     if not await check_subscription(user_id): return
-    search_msg = await event.reply(f"🔍 **جاري البحث في الأرشيف عن: ({query}) ...**")
+    # تصحيح الـ f-string لضمان عدم وجود EntityBoundsInvalidError
+    search_msg = await event.reply(f"🔍 **جاري البحث في الأرشيف عن: ({query})**")
     try:
         ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info_all = await asyncio.to_thread(lambda: ydl.extract_info(f"ytsearch10:{query}", download=False))
-            results = []
-            for entry in info_all['entries']:
-                results.append({"title": entry['title'], "url": entry['webpage_url'], "duration": entry.get('duration', 0), "uploader": entry.get('uploader', 'Unknown')})
-            if not results: return await search_msg.edit("❌ لم يتم العثور على نتائج تطابق بحثك.")
+            results = [{"title": e['title'], "url": e['webpage_url'], "duration": e.get('duration', 0), "uploader": e.get('uploader', 'Unknown')} for e in info_all['entries']]
+            if not results: return await search_msg.edit("❌ لم يتم العثور على نتائج.")
             search_results[user_id] = {"results": results, "current": 0, "query": query}
             await search_msg.delete()
             await send_search_ui(event)
     except Exception as e:
         logger.error(f"Search Error: {e}")
-        await search_msg.edit(f"❌ حدث خطأ غير متوقع أثناء البحث.")
+        await search_msg.edit(f"❌ حدث خطأ غير متوقع.")
 
 async def send_search_ui(event):
     user_id = event.sender_id
     data = search_results[user_id]
     curr = data["results"][data["current"]]
-    total = len(data["results"])
-    caption = (
-        f"**🎯 نتائج البحث لـ: ({data['query']})**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📝 العنوان:** {curr['title']}\n"
-        f"**👤 القناة:** {curr['uploader']}\n"
-        f"**🔢 النتيجة:** {data['current'] + 1} من {total}\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**⚡️ اختر صيغة التحميل للبدء فوراً:**"
-    )
-    buttons = [
-        [Button.inline("🎵 صوت (MP3)", "dl_mp3_search"), Button.inline("🎥 فيديو (MP4)", "dl_mp4_search")],
-        [Button.inline("⬅️ السابق", "search_prev"), Button.inline("➡️ التالي", "search_next")],
-        [Button.url("🌐 مشاهدة الرابط", curr['url'])]
-    ]
-    await bot.send_file(event.chat_id, db["format_img"], caption=caption, buttons=buttons)
+    caption = (f"**🎯 نتائج البحث لـ: ({data['query']})**\n**━━━━━━━━━━━━━━━━━━**\n**📝 العنوان:** {curr['title']}\n**👤 القناة:** {curr['uploader']}\n**🔢 النتيجة:** {data['current'] + 1} من {len(data['results'])}\n**━━━━━━━━━━━━━━━━━━**\n**⚡️ اختر صيغة التحميل للبدء فوراً:**")
+    buttons = [[Button.inline("🎵 صوت (MP3)", "dl_mp3_search"), Button.inline("🎥 فيديو (MP4)", "dl_mp4_search")], [Button.inline("⬅️ السابق", "search_prev"), Button.inline("➡️ التالي", "search_next")], [Button.url("🌐 مشاهدة الرابط", curr['url'])]]
+    try: await bot.send_file(event.chat_id, db["format_img"], caption=caption, buttons=buttons)
+    except (WebpageMediaEmptyError, Exception): await bot.send_message(event.chat_id, caption, buttons=buttons)
 
 async def update_search_ui(event):
     user_id = event.sender_id
     data = search_results[user_id]
     curr = data["results"][data["current"]]
-    total = len(data["results"])
-    caption = (
-        f"**🎯 نتائج البحث لـ: ({data['query']})**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📝 العنوان:** {curr['title']}\n"
-        f"**👤 القناة:** {curr['uploader']}\n"
-        f"**🔢 النتيجة:** {data['current'] + 1} من {total}\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**⚡️ اختر صيغة التحميل للبدء فوراً:**"
-    )
-    buttons = [
-        [Button.inline("🎵 صوت (MP3)", "dl_mp3_search"), Button.inline("🎥 فيديو (MP4)", "dl_mp4_search")],
-        [Button.inline("⬅️ السابق", "search_prev"), Button.inline("➡️ التالي", "search_next")],
-        [Button.url("🌐 مشاهدة الرابط", curr['url'])]
-    ]
+    caption = (f"**🎯 نتائج البحث لـ: ({data['query']})**\n**━━━━━━━━━━━━━━━━━━**\n**📝 العنوان:** {curr['title']}\n**👤 القناة:** {curr['uploader']}\n**🔢 النتيجة:** {data['current'] + 1} من {len(data['results'])}\n**━━━━━━━━━━━━━━━━━━**\n**⚡️ اختر صيغة التحميل للبدء فوراً:**")
+    buttons = [[Button.inline("🎵 صوت (MP3)", "dl_mp3_search"), Button.inline("🎥 فيديو (MP4)", "dl_mp4_search")], [Button.inline("⬅️ السابق", "search_prev"), Button.inline("➡️ التالي", "search_next")], [Button.url("🌐 مشاهدة الرابط", curr['url'])]]
     try: await event.edit(caption, buttons=buttons)
     except: pass
 
@@ -950,7 +788,7 @@ async def shazam_recognize(event):
     try:
         path = await event.download_media("downloads/shazam_temp")
         rec_data = await recognize_audio_logic(path)
-        if not rec_data["found"]: return await wait_msg.edit("❌ **عذراً، لم أستطع التعرف على هذه الأغنية من البصمة.**")
+        if not rec_data["found"]: return await wait_msg.edit("❌ **عذراً، لم أستطع التعرف على هذه الأغنية.**")
         shazam_text = f"**🎧 تم التعرف على الأغنية بنجاح!**\n**━━━━━━━━━━━━━━━━━━**\n**🎵 العنوان:** `{rec_data['title']}`\n**👤 الفنان:** `{rec_data['subtitle']}`"
         buttons = [[Button.inline("⬇️ تحميل الأغنية كاملة (MP3)", f"shazam_dl_{rec_data['full']}")], [Button.inline("❌ إغلاق", "close_admin")]]
         await wait_msg.delete()
@@ -959,42 +797,23 @@ async def shazam_recognize(event):
     finally:
         if 'path' in locals() and os.path.exists(path): os.remove(path)
 
-# --- نظام البقاء حياً (Anti-Idle) لمنع إغلاق البوت في تيرمكس ---
 async def keep_alive():
-    """وظيفة تعمل في الخلفية لمنع خمول البوت وتسريع الاستجابة"""
     while True:
-        try:
-            # تحديث بسيط لقاعدة البيانات أو مجرد تسجيل نشاط لمنع النوم
-            logger.debug("⚡️ نظام Anti-Idle: البوت في حالة تأهب قصوى...")
-            # محاكاة اتصال داخلي للحفاظ على استمرارية الـ Event Loop
-            await bot.get_me()
-        except:
-            pass
-        await asyncio.sleep(600) # العمل كل 10 دقائق
+        try: await bot.get_me()
+        except: pass
+        await asyncio.sleep(600)
 
 async def main():
     if not os.path.exists('downloads'): os.makedirs('downloads', exist_ok=True)
-    logger.info("✅ جاري تشغيل البوت المطور بكامل التحديثات (تيرمكس) ...")
-    
-    # تشغيل نظام البقاء حياً كمهمة منفصلة
     asyncio.create_task(keep_alive())
-    
     while True:
         try:
-            # إعدادات بدء التشغيل مع نظام الاسترداد التلقائي
             await bot.start(bot_token=BOT_TOKEN)
             logger.success("🚀 البوت الآن في وضع الاستعداد القصوى!")
             await bot.run_until_disconnected()
         except Exception as e:
-            logger.error(f"⚠️ حدث خطأ في الاتصال، إعادة المحاولة بعد 5 ثوانٍ: {e}")
-            await asyncio.sleep(5)
+            logger.error(f"⚠️ خطأ اتصال: {e}"); await asyncio.sleep(5)
 
 if __name__ == '__main__':
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    # تشغيل المحرك الرئيسي
+    loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
