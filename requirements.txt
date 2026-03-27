@@ -3,3 +3,4 @@ google-generativeai
 requests
 Pillow
 opencv-python-headless
+google-genai
