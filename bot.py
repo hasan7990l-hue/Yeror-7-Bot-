@@ -102,7 +102,7 @@ def is_button_active(btn_id):
 def toggle_button(btn_id, status):
     conn = sqlite3.connect('trading_history.db')
     cursor = conn.cursor()
-    cursor.execute("UPDATE custom_buttons SET is_active = ? WHERE btn_id = ?", (status, btn_id))
+    cursor.execute("UPDATE custom_buttons WHERE btn_id = ?", (status, btn_id))
     conn.commit()
     conn.close()
 
@@ -178,6 +178,7 @@ async def local_vision_analysis(image_bytes):
 
 async def ask_gemini(question):
     try:
+        # تصحيح استدعاء الموديل ليكون مباشر بدون models/
         response = await asyncio.to_thread(
             client_ai.models.generate_content,
             model="gemini-1.5-flash",
@@ -297,6 +298,7 @@ async def callback_handler(event):
                 file_path = await client.download_media(msg.photo, file="settings/")
                 set_setting(img_key, file_path)
                 await conv.send_message("✅ تم تحديث الصورة بنجاح!")
+                # العودة للوحة الإدارة
                 await admin_panel(event)
             else: await conv.send_message("❌ تم إلغاء العملية.")
 
@@ -323,8 +325,7 @@ async def callback_handler(event):
     elif data.startswith(b"tog_"):
         btn_id = data.decode().replace("tog_", ""); 
         toggle_button(btn_id, 0 if is_button_active(btn_id) else 1)
-        # إعادة فتح القائمة لتحديث الحالة
-        data = b"manage_btns"
+        # تحديث القائمة فوراً
         await callback_handler(event)
 
     elif data == b"win": update_stats(user_id, 'win'); await event.answer("🎯 مبروك! تم تسجيل الربح.", alert=True)
@@ -359,7 +360,9 @@ async def callback_handler(event):
 
 @client.on(events.NewMessage)
 async def handle_messages(event):
-    if event.sender and event.sender.bot: return
+    # منع التكرار والرد على البوت نفسه أو الأوامر
+    if event.is_private is False: return 
+    if not event.sender or event.sender.bot: return
     if event.text and event.text.startswith('/'): return
     if not await check_subscription(event.sender_id): return
 
@@ -392,17 +395,18 @@ async def handle_messages(event):
             await event.respond(f"❌ حدث خطأ أثناء التحليل: {str(e)}")
 
     elif event.text:
-        # نظام الإجابة عن الأسئلة باستخدام Gemini
         t = event.text.lower()
         
-        # حاسبة مخاطرة سريعة
-        if "حساب" in t or "مخاطرة" in t:
+        # حاسبة مخاطرة سريعة (تحسين المنطق لمنع الرد العشوائي)
+        if "حساب" in t and any(char.isdigit() for char in t):
             try:
-                p = event.text.split(); b, r = float(p[1]), float(p[2])
-                return await event.respond(f"💰 **حساب المخاطرة:**\nمبلغ الصفقة المناسب: **${b*(r/100):.2f}**")
+                parts = [float(s) for s in t.split() if s.replace('.','',1).isdigit()]
+                if len(parts) >= 2:
+                    balance, risk = parts[0], parts[1]
+                    return await event.respond(f"💰 **حساب المخاطرة:**\nمبلغ الصفقة المناسب: **${balance*(risk/100):.2f}**")
             except: pass
 
-        # ردود تفاعلية أو أسئلة عامة
+        # ردود ذكية فقط للرسائل النصية التي ليست أوامر
         loading = await event.respond("🤔 **جاري التفكير...**")
         ai_reply = await ask_gemini(event.text)
         await loading.delete()
