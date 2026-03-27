@@ -42,7 +42,7 @@ client_ai = genai.Client(api_key=GEMINI_KEY)
 
 OWNER_ID = 8456056018 
 OWNER_USERNAME = "@Eror_7"
-CHANNEL_USERNAME = "@Tl2_2" # قناة الاشتراك الإجباري
+DEFAULT_CHANNEL = "@Tl2_2"
 
 # ==========================================
 # إعداد قاعدة البيانات المتطورة
@@ -67,10 +67,8 @@ def setup_db():
     ]
     cursor.executemany("INSERT OR IGNORE INTO custom_buttons (btn_id, btn_text) VALUES (?, ?)", default_btns)
 
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if 'status' not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'FREE'")
+    # التأكد من وجود إعداد القناة الافتراضية
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('channel_username', DEFAULT_CHANNEL))
     
     conn.commit()
     conn.close()
@@ -161,7 +159,7 @@ def is_chart_image(image_bytes):
 async def local_vision_analysis(image_bytes):
     try:
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-        prompt = """أنت خبير تداول محترف. حلل صورة الشارت تقنياً وأعطِ إشارة واضحة: [BUY_SIGNAL] للشراء أو [SELL_SIGNAL] للبيع، مع توضيح السبب ونسبة القوة."""
+        prompt = """أنت خبير تداول محترف. حلل صورة الشارت تقنياً وأعطِ إشارة واضحة: [BUY_SIGNAL] للشراء أو [SELL_SIGNAL] للبيع، مع توضيح السبب ونسبة القوة والدعم والمقاومة."""
         
         response = await asyncio.to_thread(
             client_ai.models.generate_content,
@@ -178,6 +176,17 @@ async def local_vision_analysis(image_bytes):
         logger.error(f"AI Engine Error: {str(e)}")
         return f"⚠️ خطأ في المحرك الذكي: {str(e)}", None
 
+async def ask_gemini(question):
+    try:
+        response = await asyncio.to_thread(
+            client_ai.models.generate_content,
+            model="gemini-1.5-flash",
+            contents=[f"أجب على هذا السؤال باختصار وذكاء كخبير تداول: {question}"]
+        )
+        return response.text
+    except Exception as e:
+        return f"⚠️ عذراً، لم أستطع معالجة سؤالك الآن. ({str(e)})"
+
 # ==========================================
 # إعداد عميل التيليجرام (Telethon)
 # ==========================================
@@ -185,18 +194,28 @@ client = TelegramClient('pocket_option_session', API_ID, API_HASH)
 
 async def check_subscription(user_id):
     if user_id == OWNER_ID: return True
+    channel = get_setting('channel_username', DEFAULT_CHANNEL)
     try:
-        await client(GetParticipantRequest(channel=CHANNEL_USERNAME, user_id=user_id))
+        await client(GetParticipantRequest(channel=channel, user_id=user_id))
         return True
     except UserNotParticipantError: return False
     except: return True 
 
+# نصوص الواجهة الجديدة
 START_TEXT = (
-    f"🚀 **مرحباً بك في Hyper Trading System**\n\n"
-    f"أنا المساعد الذكي المطور خصيصاً لتحليل أسواق الخيارات الثنائية. "
-    f"أعمل بأحدث تقنيات Gemini AI للرؤية الحاسوبية.\n\n"
-    f"🛡️ **للبدء:** أرسل صورة الشارت الآن.\n\n"
-    f"👨‍💻 **المطور:** {OWNER_USERNAME}"
+    "🌟 **مرحباً بك في نظام Hyper Trading المطور V5.0** 🌟\n\n"
+    "أنا مساعدك الذكي المعتمد على أقوى تقنيات الذكاء الاصطناعي لتحليل سوق الـ Binary Options.\n\n"
+    "✅ **بماذا يمكنني مساعدتك؟**\n"
+    "1️⃣ أرسل صورة للشارت لتحليلها فوراً.\n"
+    "2️⃣ اسألني أي سؤال حول التداول وسأجيبك.\n"
+    "3️⃣ استخدم أدوات الحساب المدمجة لإدارة مخاطرك.\n\n"
+    f"🛠️ **المطور المسؤول:** {OWNER_USERNAME}\n"
+    "🛡️ **الحالة:** متصل وجاهز للتحليل"
+)
+
+ADMIN_WELCOME = (
+    "👨‍💻 **أهلاً بك يا مطورنا في لوحة التحكم**\n\n"
+    "هنا يمكنك إدارة البوت بالكامل، التحكم بالأزرار، تغيير قنوات الاشتراك، وإرسال الإذاعات للمستخدمين."
 )
 
 def get_start_buttons():
@@ -209,13 +228,16 @@ def get_start_buttons():
     if is_button_active('risk_calc'): row2.append(Button.inline("💰 حاسبة المخاطرة", b"risk_calc"))
     if is_button_active('martingale_info'): row2.append(Button.inline("🔄 نظام التعويض", b"martingale_info"))
     if row2: btns.append(row2)
-    btns.append([Button.url("🌐 قناة التحديثات", f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")])
+    channel = get_setting('channel_username', DEFAULT_CHANNEL)
+    btns.append([Button.url("🌐 قناة التحديثات", f"https://t.me/{channel.replace('@', '')}")])
     return btns
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if not await check_subscription(event.sender_id):
-        return await event.respond(f"⚠️ **اشترك بالقناة أولاً!**", buttons=[Button.url("🔗 اشتراك", f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")])
+        channel = get_setting('channel_username', DEFAULT_CHANNEL)
+        return await event.respond(f"⚠️ **عذراً! يجب عليك الاشتراك في القناة أولاً لاستخدام البوت.**", 
+                                 buttons=[Button.url("🔗 اضغط هنا للاشتراك", f"https://t.me/{channel.replace('@', '')}")])
     add_user(event.sender_id)
     welcome_img = get_setting('welcome_img')
     if welcome_img: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
@@ -223,11 +245,18 @@ async def start_handler(event):
 
 @client.on(events.NewMessage(pattern='/admin'))
 async def admin_panel(event):
-    if event.sender_id != OWNER_ID: return await event.respond("⚠️ للمطور فقط.")
+    if event.sender_id != OWNER_ID: return await event.respond("⚠️ هذا الأمر مخصص للمطور فقط.")
     conn = sqlite3.connect('trading_history.db'); cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users"); total_users = cursor.fetchone()[0]; conn.close()
-    admin_text = f"🛠️ **لوحة التحكم**\n\n📊 عدد المستخدمين: {total_users}"
-    buttons = [[Button.inline("🖼️ تعيين صور النظام", b"set_images")], [Button.inline("🔘 إدارة الأزرار", b"manage_btns")], [Button.inline("📢 إذاعة", b"broadcast")], [Button.inline("🔙 القائمة", b"back_to_start")]]
+    
+    admin_text = f"{ADMIN_WELCOME}\n\n📊 **إحصائيات النظام:**\n👥 عدد المشتركين: {total_users}\n📡 القناة الحالية: {get_setting('channel_username')}"
+    
+    buttons = [
+        [Button.inline("🖼️ إعداد صور النظام", b"set_images"), Button.inline("🔘 إدارة الأزرار", b"manage_btns")],
+        [Button.inline("📢 إذاعة عامة", b"broadcast"), Button.inline("🔗 قناة الاشتراك", b"set_channel")],
+        [Button.inline("🔙 العودة للواجهة", b"back_to_start_del")]
+    ]
+    
     admin_img = get_setting('admin_img')
     if admin_img: await client.send_file(event.chat_id, admin_img, caption=admin_text, buttons=buttons)
     else: await event.respond(admin_text, buttons=buttons)
@@ -235,78 +264,122 @@ async def admin_panel(event):
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id; data = event.data
+    
+    # تنفيذ نظام الحذف لضمان التحديث النظيف
+    if data in [b"back_to_start_del", b"back_admin_del"]:
+        await event.delete()
+        if data == b"back_to_start_del":
+            welcome_img = get_setting('welcome_img')
+            if welcome_img: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
+            else: await client.send_message(event.chat_id, START_TEXT, buttons=get_start_buttons())
+        else:
+            await admin_panel(event)
+        return
+
     if not await check_subscription(user_id): return await event.answer("⚠️ اشترك أولاً!", alert=True)
 
-    if data == b"back_to_start":
-        await event.delete(); welcome_img = get_setting('welcome_img')
-        if welcome_img: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
-        else: await client.send_message(event.chat_id, START_TEXT, buttons=get_start_buttons())
-
-    elif data == b"set_images":
-        btns = [[Button.inline("👋 الترحيب", b"set_welcome_img")], [Button.inline("🛠️ الإدارة", b"set_admin_img")], [Button.inline("📈 صعود", b"set_up_img")], [Button.inline("📉 هبوط", b"set_down_img")], [Button.inline("🔙 عودة", b"back_admin")]]
-        await event.edit("🖼️ إعدادات الصور:", buttons=btns)
+    if data == b"set_images":
+        btns = [
+            [Button.inline("👋 صورة الترحيب", b"set_welcome_img"), Button.inline("🛠️ صورة الإدارة", b"set_admin_img")],
+            [Button.inline("📈 صورة الصعود", b"set_up_img"), Button.inline("📉 صورة الهبوط", b"set_down_img")],
+            [Button.inline("🔙 عودة", b"back_admin_del")]
+        ]
+        await event.delete()
+        await client.send_message(event.chat_id, "🖼️ **إعدادات الوسائط:**\nاختر الصورة التي تريد تغييرها:", buttons=btns)
 
     elif data.startswith(b"set_") and data.endswith(b"_img"):
         img_key = data.decode().replace("set_", ""); await event.delete()
         async with client.conversation(user_id) as conv:
-            await conv.send_message("📸 أرسل الصورة الآن:"); msg = await conv.get_response()
+            await conv.send_message("📸 **أرسل الصورة الجديدة الآن (أو أرسل 'إلغاء'):**")
+            msg = await conv.get_response()
             if msg.photo:
                 if not os.path.exists('settings'): os.makedirs('settings')
-                file_path = await client.download_media(msg.photo, file="settings/"); set_setting(img_key, file_path)
-                await conv.send_message("✅ تم التحديث!")
-            else: await conv.send_message("❌ إلغاء.")
+                file_path = await client.download_media(msg.photo, file="settings/")
+                set_setting(img_key, file_path)
+                await conv.send_message("✅ تم تحديث الصورة بنجاح!")
+                await admin_panel(event)
+            else: await conv.send_message("❌ تم إلغاء العملية.")
+
+    elif data == b"set_channel":
+        await event.delete()
+        async with client.conversation(user_id) as conv:
+            await conv.send_message("🔗 **أرسل يوزر القناة الجديد مع الـ @ (مثال: @Tl2_2):**")
+            msg = await conv.get_response()
+            if msg.text and msg.text.startswith("@"):
+                set_setting('channel_username', msg.text)
+                await conv.send_message(f"✅ تم تغيير قناة الاشتراك إلى: {msg.text}")
+                await admin_panel(event)
+            else: await conv.send_message("❌ يوزر غير صحيح.")
 
     elif data == b"manage_btns":
-        btns = [[Button.inline(f"{'🔴 حذف' if is_button_active(b) else '🟢 تفعيل'} {b}", f"tog_{b}".encode()) for b in ['how_it_works', 'my_stats']], [Button.inline("🔙 عودة", b"back_admin")]]
-        await event.edit("🔘 إدارة الأزرار:", buttons=btns)
+        btns = [
+            [Button.inline(f"{'🔴 تعطيل' if is_button_active('how_it_works') else '🟢 تفعيل'} الاستخدام", b"tog_how_it_works")],
+            [Button.inline(f"{'🔴 تعطيل' if is_button_active('my_stats') else '🟢 تفعيل'} الإحصائيات", b"tog_my_stats")],
+            [Button.inline("🔙 عودة", b"back_admin_del")]
+        ]
+        await event.delete()
+        await client.send_message(event.chat_id, "🔘 **إدارة أزرار الواجهة:**", buttons=btns)
 
     elif data.startswith(b"tog_"):
-        btn_id = data.decode().replace("tog_", ""); toggle_button(btn_id, 0 if is_button_active(btn_id) else 1)
-        await callback_handler(event) # تحديث القائمة
+        btn_id = data.decode().replace("tog_", ""); 
+        toggle_button(btn_id, 0 if is_button_active(btn_id) else 1)
+        # إعادة فتح القائمة لتحديث الحالة
+        data = b"manage_btns"
+        await callback_handler(event)
 
-    elif data == b"back_admin": await admin_panel(event)
-    elif data == b"win": update_stats(user_id, 'win'); await event.edit("🎯 تم تسجيل الربح!")
-    elif data == b"loss": update_stats(user_id, 'loss'); await event.edit("⚠️ تم تسجيل الخسارة.")
+    elif data == b"win": update_stats(user_id, 'win'); await event.answer("🎯 مبروك! تم تسجيل الربح.", alert=True)
+    elif data == b"loss": update_stats(user_id, 'loss'); await event.answer("⚠️ تعوضها بإذن الله. تم تسجيل الخسارة.", alert=True)
 
     elif data == b"broadcast":
+        await event.delete()
         async with client.conversation(user_id) as conv:
-            await conv.send_message("📝 أكتب الرسالة:"); msg = await conv.get_response()
+            await conv.send_message("📝 **أرسل الرسالة التي تريد إذاعتها (نص فقط):**")
+            msg = await conv.get_response()
             conn = sqlite3.connect('trading_history.db'); cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM users"); users = cursor.fetchall(); conn.close()
+            sent = 0
             for u in users:
-                try: await client.send_message(u[0], msg.text)
+                try: await client.send_message(u[0], msg.text); sent += 1
                 except: continue
-            await conv.send_message("✅ تم.")
+            await conv.send_message(f"✅ تم إرسال الرسالة إلى {sent} مستخدم.")
+            await admin_panel(event)
 
     elif data == b"how_it_works":
-        await event.respond("💡 التقط صورة واضحة للشارت وأرسلها هنا.", buttons=[[Button.inline("🔙 عودة", b"back_to_start")]])
+        await event.delete()
+        text = "💡 **طريقة استخدام البوت:**\n\n1. ادخل لمنصة التداول الخاصة بك.\n2. التقط صورة شاشة (Screenshot) واضحة للشارت.\n3. أرسل الصورة هنا مباشرة.\n4. انتظر ثواني وسيقوم الذكاء الاصطناعي بتحليل الشموع والاتجاهات ليعطيك أفضل قرار (بيع أو شراء)."
+        await client.send_message(event.chat_id, text, buttons=[[Button.inline("🔙 عودة", b"back_to_start_del")]])
 
     elif data == b"my_stats":
         conn = sqlite3.connect('trading_history.db'); cursor = conn.cursor()
         cursor.execute("SELECT wins, losses FROM stats WHERE user_id = ?", (user_id,)); row = cursor.fetchone(); conn.close()
-        text = f"📊 إحصائياتك: ✅ {row[0] if row else 0} | ❌ {row[1] if row else 0}"
-        await event.respond(text, buttons=[[Button.inline("🔙 عودة", b"back_to_start")]])
+        w = row[0] if row else 0; l = row[1] if row else 0
+        text = f"📊 **إحصائياتك الشخصية:**\n\n✅ صفقات ناجحة: {w}\n❌ صفقات خاسرة: {l}\n📈 معدل الفوز: {(w/(w+l)*100 if (w+l)>0 else 0):.1f}%"
+        await event.delete()
+        await client.send_message(event.chat_id, text, buttons=[[Button.inline("🔙 عودة", b"back_to_start_del")]])
 
 @client.on(events.NewMessage)
 async def handle_messages(event):
+    if event.sender and event.sender.bot: return
     if event.text and event.text.startswith('/'): return
     if not await check_subscription(event.sender_id): return
 
     if event.photo:
         photo_data = await event.download_media(file=bytes)
-        if not is_chart_image(photo_data): return await event.respond("⚠️ أرسل صورة شارت واضحة.")
+        if not is_chart_image(photo_data): 
+            return await event.respond("⚠️ عذراً، هذه لا تبدو صورة شارت تداول. يرجى إرسال صورة واضحة للشارت.")
         
-        # نظام الحذف الجديد
         status_msg = await event.respond("🔍 **جاري تشغيل محرك Hyper AI...**")
-        await asyncio.sleep(0.5); await status_msg.edit("⚙️ **جاري التحليل الفني...**")
+        await asyncio.sleep(0.5); await status_msg.edit("⚙️ **جاري فحص الشموع والنماذج الفنية...**")
 
         try:
             result_text_ai, img_type = await local_vision_analysis(photo_data)
-            analysis_buttons = [[Button.inline("✅ ربح", b"win"), Button.inline("❌ خسارة", b"loss")], [Button.inline("🔙 الرئيسية", b"back_to_start")]]
+            analysis_buttons = [
+                [Button.inline("✅ ربح", b"win"), Button.inline("❌ خسارة", b"loss")],
+                [Button.inline("🔙 القائمة الرئيسية", b"back_to_start_del")]
+            ]
             
-            # تنفيذ التعديل بالحذف لضمان عمله على Railway
             await status_msg.delete()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             
             custom_img = get_setting(img_type)
             if custom_img and os.path.exists(custom_img):
@@ -316,26 +389,28 @@ async def handle_messages(event):
         except Exception as e:
             try: await status_msg.delete()
             except: pass
-            await event.respond(f"❌ خطأ: {str(e)}")
+            await event.respond(f"❌ حدث خطأ أثناء التحليل: {str(e)}")
 
-    elif event.text and "حساب" in event.text:
-        try:
-            p = event.text.split(); b, r = float(p[1]), float(p[2])
-            await event.respond(f"💰 مخاطرة: **${b*(r/100):.2f}**")
-        except: pass
-
-    elif event.is_private and event.text:
-        loading = await event.respond("🌀 **جاري معالجة طلبك...**")
-        await asyncio.sleep(0.8); await loading.delete()
-        
+    elif event.text:
+        # نظام الإجابة عن الأسئلة باستخدام Gemini
         t = event.text.lower()
-        if any(w in t for w in ["هلا", "مرحبا"]): res = "أهلاً بك! أرسل صورة الشارت وسأحللها لك."
-        else: res = f"استلمت رسالتك: '{event.text}'. هل تريد تحليل شارت؟"
-        await event.respond(res)
+        
+        # حاسبة مخاطرة سريعة
+        if "حساب" in t or "مخاطرة" in t:
+            try:
+                p = event.text.split(); b, r = float(p[1]), float(p[2])
+                return await event.respond(f"💰 **حساب المخاطرة:**\nمبلغ الصفقة المناسب: **${b*(r/100):.2f}**")
+            except: pass
+
+        # ردود تفاعلية أو أسئلة عامة
+        loading = await event.respond("🤔 **جاري التفكير...**")
+        ai_reply = await ask_gemini(event.text)
+        await loading.delete()
+        await event.respond(f"🤖 **Hyper AI:**\n\n{ai_reply}")
 
 async def main():
     if not os.path.exists('settings'): os.makedirs('settings')
-    print("⚡ HYPER VISION V5.0 ONLINE ⚡")
+    print("⚡ HYPER VISION V5.0 ONLINE - SYSTEM READY ⚡")
     await client.start(bot_token=BOT_TOKEN)
     await client.run_until_disconnected()
 
