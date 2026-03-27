@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageEnhance, ImageOps
 from telethon import TelegramClient, events, Button
 from telethon.tl.functions.channels import GetParticipantRequest
-from telethon.errors.rpcerrorlist import UserNotParticipantError
+from telethon.errors.rpcerrorlist import UserNotParticipantError, FloodWaitError
 import cv2
 import numpy as np
 
@@ -38,7 +38,8 @@ BOT_TOKEN = '8217717390:AAGsekYq5_wvyC23I48UobKnHQK3-SkiH6o'
 
 # تم تحديث المفتاح الخاص بك هنا
 GEMINI_KEY = "AIzaSyDkm0AKk4sECKdhzAOEpLXELQNML41XcZ4" 
-client_ai = genai.Client(api_key=GEMINI_KEY)
+# إعداد العميل مع تحديد الإصدار لضمان عدم حدوث 404
+client_ai = genai.Client(api_key=GEMINI_KEY, http_options={'api_version': 'v1'})
 
 OWNER_ID = 8456056018 
 OWNER_USERNAME = "@Eror_7"
@@ -102,7 +103,7 @@ def is_button_active(btn_id):
 def toggle_button(btn_id, status):
     conn = sqlite3.connect('trading_history.db')
     cursor = conn.cursor()
-    cursor.execute("UPDATE custom_buttons WHERE btn_id = ?", (status, btn_id))
+    cursor.execute("UPDATE custom_buttons SET is_active = ? WHERE btn_id = ?", (status, btn_id))
     conn.commit()
     conn.close()
 
@@ -161,8 +162,8 @@ async def local_vision_analysis(image_bytes):
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
         prompt = """أنت خبير تداول محترف. حلل صورة الشارت تقنياً وأعطِ إشارة واضحة: [BUY_SIGNAL] للشراء أو [SELL_SIGNAL] للبيع، مع توضيح السبب ونسبة القوة والدعم والمقاومة."""
         
-        response = await asyncio.to_thread(
-            client_ai.models.generate_content,
+        # استدعاء مباشر ومحسن للموديل
+        response = client_ai.models.generate_content(
             model="gemini-1.5-flash",
             contents=[prompt, image_part]
         )
@@ -178,9 +179,7 @@ async def local_vision_analysis(image_bytes):
 
 async def ask_gemini(question):
     try:
-        # تصحيح استدعاء الموديل ليكون مباشر بدون models/
-        response = await asyncio.to_thread(
-            client_ai.models.generate_content,
+        response = client_ai.models.generate_content(
             model="gemini-1.5-flash",
             contents=[f"أجب على هذا السؤال باختصار وذكاء كخبير تداول: {question}"]
         )
@@ -241,7 +240,9 @@ async def start_handler(event):
                                  buttons=[Button.url("🔗 اضغط هنا للاشتراك", f"https://t.me/{channel.replace('@', '')}")])
     add_user(event.sender_id)
     welcome_img = get_setting('welcome_img')
-    if welcome_img: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
+    if welcome_img: 
+        try: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
+        except: await event.respond(START_TEXT, buttons=get_start_buttons())
     else: await event.respond(START_TEXT, buttons=get_start_buttons())
 
 @client.on(events.NewMessage(pattern='/admin'))
@@ -259,19 +260,22 @@ async def admin_panel(event):
     ]
     
     admin_img = get_setting('admin_img')
-    if admin_img: await client.send_file(event.chat_id, admin_img, caption=admin_text, buttons=buttons)
+    if admin_img: 
+        try: await client.send_file(event.chat_id, admin_img, caption=admin_text, buttons=buttons)
+        except: await event.respond(admin_text, buttons=buttons)
     else: await event.respond(admin_text, buttons=buttons)
 
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id; data = event.data
     
-    # تنفيذ نظام الحذف لضمان التحديث النظيف
     if data in [b"back_to_start_del", b"back_admin_del"]:
         await event.delete()
         if data == b"back_to_start_del":
             welcome_img = get_setting('welcome_img')
-            if welcome_img: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
+            if welcome_img: 
+                try: await client.send_file(event.chat_id, welcome_img, caption=START_TEXT, buttons=get_start_buttons())
+                except: await client.send_message(event.chat_id, START_TEXT, buttons=get_start_buttons())
             else: await client.send_message(event.chat_id, START_TEXT, buttons=get_start_buttons())
         else:
             await admin_panel(event)
@@ -298,7 +302,6 @@ async def callback_handler(event):
                 file_path = await client.download_media(msg.photo, file="settings/")
                 set_setting(img_key, file_path)
                 await conv.send_message("✅ تم تحديث الصورة بنجاح!")
-                # العودة للوحة الإدارة
                 await admin_panel(event)
             else: await conv.send_message("❌ تم إلغاء العملية.")
 
@@ -325,7 +328,6 @@ async def callback_handler(event):
     elif data.startswith(b"tog_"):
         btn_id = data.decode().replace("tog_", ""); 
         toggle_button(btn_id, 0 if is_button_active(btn_id) else 1)
-        # تحديث القائمة فوراً
         await callback_handler(event)
 
     elif data == b"win": update_stats(user_id, 'win'); await event.answer("🎯 مبروك! تم تسجيل الربح.", alert=True)
@@ -360,7 +362,6 @@ async def callback_handler(event):
 
 @client.on(events.NewMessage)
 async def handle_messages(event):
-    # منع التكرار والرد على البوت نفسه أو الأوامر
     if event.is_private is False: return 
     if not event.sender or event.sender.bot: return
     if event.text and event.text.startswith('/'): return
@@ -396,8 +397,6 @@ async def handle_messages(event):
 
     elif event.text:
         t = event.text.lower()
-        
-        # حاسبة مخاطرة سريعة (تحسين المنطق لمنع الرد العشوائي)
         if "حساب" in t and any(char.isdigit() for char in t):
             try:
                 parts = [float(s) for s in t.split() if s.replace('.','',1).isdigit()]
@@ -406,7 +405,6 @@ async def handle_messages(event):
                     return await event.respond(f"💰 **حساب المخاطرة:**\nمبلغ الصفقة المناسب: **${balance*(risk/100):.2f}**")
             except: pass
 
-        # ردود ذكية فقط للرسائل النصية التي ليست أوامر
         loading = await event.respond("🤔 **جاري التفكير...**")
         ai_reply = await ask_gemini(event.text)
         await loading.delete()
@@ -415,8 +413,17 @@ async def handle_messages(event):
 async def main():
     if not os.path.exists('settings'): os.makedirs('settings')
     print("⚡ HYPER VISION V5.0 ONLINE - SYSTEM READY ⚡")
-    await client.start(bot_token=BOT_TOKEN)
-    await client.run_until_disconnected()
+    
+    # معالجة ذكية لتسجيل الدخول لتجنب الـ FloodWaitError
+    try:
+        await client.start(bot_token=BOT_TOKEN)
+        await client.run_until_disconnected()
+    except FloodWaitError as e:
+        print(f"⚠️ نظام حماية تلجرام نشط. انتظر {e.seconds} ثانية...")
+        await asyncio.sleep(e.seconds)
+        await main()
+    except Exception as e:
+        print(f"❌ Fatal Error: {e}")
 
 if __name__ == '__main__':
     asyncio.run(main())
