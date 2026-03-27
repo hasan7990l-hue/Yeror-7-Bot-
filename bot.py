@@ -805,8 +805,72 @@ async def process_youtube_download(event, url, task_id, mode="mp3", original_msg
             try: os.remove(f)
             except: pass
 
-# --- [تحديث] معالج البحث التلقائي ---
-@bot.on(events.NewMessage(func=lambda e: e.text and not e.text.startswith('/') and not e.text.startswith('http') and not e.text.startswith('تحميل') and not e.text.startswith('تح')))
+# --- [ترتيب معدل] معالجة الروابط أولاً ثم البحث ---
+
+@bot.on(events.NewMessage(pattern=r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+'))
+async def handle_youtube_link(event):
+    if not await check_subscription(event.sender_id): return
+    url = event.text
+    wait_msg = await event.reply("🔍 **جاري تحليل الرابط...**")
+    rec_data = {"found": False}
+    try:
+        ydl_opts = {'format': 'bestaudio/best', 'outtmpl': f'downloads/rec_{event.id}.%(ext)s', 'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            f_path = ydl.prepare_filename(info)
+            rec_data = await recognize_audio_logic(f_path)
+            if os.path.exists(f_path): os.remove(f_path)
+    except: pass
+    
+    format_text = (
+        f"**🎥 تم التعرف على الرابط بنجاح!**\n"
+        f"**━━━━━━━━━━━━━━━━━━**\n"
+        f"**📥 يرجى اختيار صيغة التحميل المفضلة:**\n"
+    )
+    buttons = [[Button.inline("🎵 تحميل صوت (MP3)", "dl_mp3_vid"), Button.inline("🎥 تحميل فيديو (MP4)", "dl_mp4_vid")]]
+    if rec_data["found"]:
+        format_text += f"**🎧 الأغنية المكتشفة:** `{rec_data['full']}`\n"
+        buttons.insert(0, [Button.inline(f"⬇️ تحميل الأغنية الأصلية (MP3)", f"shazam_dl_{rec_data['full']}")])
+    
+    format_text += f"**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}"
+    buttons.append([Button.inline("❌ إلغاء العملية", "close_admin")])
+    
+    await wait_msg.delete()
+    await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
+
+@bot.on(events.NewMessage(pattern=r'(https?://)?(www\.|vm\.|vt\.)?tiktok\.com/.+'))
+async def handle_tiktok_link(event):
+    if not await check_subscription(event.sender_id): return
+    url = event.text
+    wait_msg = await event.reply("🔍 **جاري معالجة فيديو تيك توك...**")
+    rec_data = {"found": False}
+    try:
+        ydl_opts = {'format': 'bestaudio/best', 'outtmpl': f'downloads/rec_{event.id}.%(ext)s', 'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            f_path = ydl.prepare_filename(info)
+            rec_data = await recognize_audio_logic(f_path)
+            if os.path.exists(f_path): os.remove(f_path)
+    except: pass
+    
+    format_text = (
+        f"**💎 تم التعرف على رابط تيك توك!**\n"
+        f"**━━━━━━━━━━━━━━━━━━**\n"
+        f"**📥 اختر كيف تريد تحميل المحتوى:**\n"
+    )
+    buttons = [[Button.inline("🎥 فيديو (بدون علامة)", "tk_mp4_tk"), Button.inline("🎵 صوت فقط (MP3)", "tk_mp3_tk")]]
+    if rec_data["found"]:
+        format_text += f"**🎧 الأغنية المكتشفة:** `{rec_data['full']}`\n"
+        buttons.insert(0, [Button.inline(f"⬇️ تحميل الأغنية الأصلية (MP3)", f"shazam_dl_{rec_data['full']}")])
+    
+    format_text += f"**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}"
+    buttons.append([Button.inline("❌ إلغاء العملية", "close_admin")])
+    
+    await wait_msg.delete()
+    await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
+
+# --- [تعديل فلتر البحث] لضمان عدم التقاط الروابط ---
+@bot.on(events.NewMessage(func=lambda e: e.text and not e.text.startswith('/') and not e.text.startswith('http') and not '://' in e.text and not e.text.startswith('تحميل') and not e.text.startswith('تح')))
 async def auto_search_handler(event):
     if event.chat_id in bot._conversations: return
     query = event.text
@@ -878,68 +942,6 @@ async def update_search_ui(event):
     ]
     try: await event.edit(caption, buttons=buttons)
     except: pass
-
-@bot.on(events.NewMessage(pattern=r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+'))
-async def handle_youtube_link(event):
-    if not await check_subscription(event.sender_id): return
-    url = event.text
-    wait_msg = await event.reply("🔍 **جاري تحليل الرابط...**")
-    rec_data = {"found": False}
-    try:
-        ydl_opts = {'format': 'bestaudio/best', 'outtmpl': f'downloads/rec_{event.id}.%(ext)s', 'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            f_path = ydl.prepare_filename(info)
-            rec_data = await recognize_audio_logic(f_path)
-            if os.path.exists(f_path): os.remove(f_path)
-    except: pass
-    
-    format_text = (
-        f"**🎥 تم التعرف على الرابط بنجاح!**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📥 يرجى اختيار صيغة التحميل المفضلة:**\n"
-    )
-    buttons = [[Button.inline("🎵 تحميل صوت (MP3)", "dl_mp3_vid"), Button.inline("🎥 تحميل فيديو (MP4)", "dl_mp4_vid")]]
-    if rec_data["found"]:
-        format_text += f"**🎧 الأغنية المكتشفة:** `{rec_data['full']}`\n"
-        buttons.insert(0, [Button.inline(f"⬇️ تحميل الأغنية الأصلية (MP3)", f"shazam_dl_{rec_data['full']}")])
-    
-    format_text += f"**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}"
-    buttons.append([Button.inline("❌ إلغاء العملية", "close_admin")])
-    
-    await wait_msg.delete()
-    await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
-
-@bot.on(events.NewMessage(pattern=r'(https?://)?(www\.|vm\.|vt\.)?tiktok\.com/.+'))
-async def handle_tiktok_link(event):
-    if not await check_subscription(event.sender_id): return
-    url = event.text
-    wait_msg = await event.reply("🔍 **جاري معالجة فيديو تيك توك...**")
-    rec_data = {"found": False}
-    try:
-        ydl_opts = {'format': 'bestaudio/best', 'outtmpl': f'downloads/rec_{event.id}.%(ext)s', 'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            f_path = ydl.prepare_filename(info)
-            rec_data = await recognize_audio_logic(f_path)
-            if os.path.exists(f_path): os.remove(f_path)
-    except: pass
-    
-    format_text = (
-        f"**💎 تم التعرف على رابط تيك توك!**\n"
-        f"**━━━━━━━━━━━━━━━━━━**\n"
-        f"**📥 اختر كيف تريد تحميل المحتوى:**\n"
-    )
-    buttons = [[Button.inline("🎥 فيديو (بدون علامة)", "tk_mp4_tk"), Button.inline("🎵 صوت فقط (MP3)", "tk_mp3_tk")]]
-    if rec_data["found"]:
-        format_text += f"**🎧 الأغنية المكتشفة:** `{rec_data['full']}`\n"
-        buttons.insert(0, [Button.inline(f"⬇️ تحميل الأغنية الأصلية (MP3)", f"shazam_dl_{rec_data['full']}")])
-    
-    format_text += f"**━━━━━━━━━━━━━━━━━━**\n**📟 المطور:** {DEV_USER}"
-    buttons.append([Button.inline("❌ إلغاء العملية", "close_admin")])
-    
-    await wait_msg.delete()
-    await bot.send_file(event.chat_id, db["format_img"], caption=format_text, buttons=buttons, reply_to=event.id)
 
 @bot.on(events.NewMessage(func=lambda e: e.voice or e.audio))
 async def shazam_recognize(event):
