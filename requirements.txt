@@ -1,3 +1,5 @@
+opencv-python-headless
+numpy
 telethon
 google-generativeai
 requests
