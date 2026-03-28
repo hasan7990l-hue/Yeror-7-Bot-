@@ -10,8 +10,8 @@ logging.basicConfig(level=logging.INFO)
 
 # --- إعدادات البوت الأساسية ---
 API_ID = 8456056018  # معرف الأدمن الخاص بك
-API_HASH = "ضع_هنا_الـ_API_HASH_الخاص_بك" 
-BOT_TOKEN = "ضع_هنا_توكن_البوت_الخاص_بك"
+API_HASH = "544459a0701b32741254945b08daebfe" 
+BOT_TOKEN = "8180650384:AAEMk7xiqf5uXaOUw0DXdYIsjko_bk4P_6M"
 
 # قنوات المصدر الخاصة بك
 CHANNEL_LINK = "https://t.me/Tl2_2"
