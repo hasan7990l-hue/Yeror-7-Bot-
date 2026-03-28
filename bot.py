@@ -4,15 +4,19 @@ from youtube_search import YoutubeSearch
 import json
 import os
 import yt_dlp
+import re
 
 # --- بيانات المطور الأساسية ---
-# ملاحظة: تأكد من صحة التوكن والـ API والمعرفات أدناه
 TOKEN = '8180650384:AAEMk7xiqf5uXaOUw0DXdYIsjko_bk4P_6M'
 DEVELOPER_ID = 8456056018
 API_ID = 35247597
 API_HASH = 'ff0000a5175c6b79e322677e9a537a57'
 SOURCE_CHANNEL = '@Tl2_2'
 DEVELOPER_USER = '@lb2_c'
+
+# ملفات الكوكيز لتجاوز الحظر على السيرفرات (مثل Railway)
+YT_COOKIES = 'youtube_cookies.txt'
+TT_COOKIES = 'tiktok_cookies.txt'
 
 bot = telebot.TeleBot(TOKEN)
 DATA_FILE = 'bot_settings.json'
@@ -25,7 +29,7 @@ if not os.path.exists(DATA_FILE):
         "dev_user": "@lb2_c",
         "sub_channels": [],
         "sub_msg": "عذراً، يجب عليك الاشتراك في قنواتنا لاستخدام البوت.",
-        "welcome_msg": "أهلاً بك في بوت تحميل الموسيقى من يوتيوب!",
+        "welcome_msg": "أهلاً بك في بوت تحميل الموسيقى من يوتيوب وتيك توك!",
         "welcome_photo": None,
         "notifications": True,
         "bot_name": "بوت الخدمة",
@@ -100,7 +104,7 @@ def start(message):
     
     welcome_text = f"**{settings['welcome_msg']}**\n\n" \
                    f"**مرحباً بك يا {message.from_user.first_name} في بوت {settings['bot_name']}.**\n" \
-                   f"**أنا هنا لمساعدتك في العثور على المقاطع الصوتية وتحميلها من يوتيوب بجودة عالية.**"
+                   f"**أنا هنا لمساعدتك في العثور على المقاطع الصوتية وتحميلها من يوتيوب وتيك توك بجودة عالية.**"
     
     if settings.get('welcome_photo'):
         try:
@@ -164,7 +168,7 @@ def callback_listener(call):
 
     elif call.data == "services":
         bot.answer_callback_query(call.id)
-        help_msg = "**How to use the bot:**\n\n**Send one of the shortcuts followed by the track name:**\n`يوت` , `y` , `yt` , `ewt` \n\n**Example:**\n`y Alan Walker` \n`يوت سورة الكهف`"
+        help_msg = "**How to use the bot:**\n\n**1. للبحث بالاسم:**\n`يوت` , `y` , `yt` + اسم المقطع\n\n**2. للتحميل بالرابط:**\nأرسل رابط يوتيوب أو تيك توك مباشرة في الدردشة."
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data="back_to_start"))
         
@@ -351,7 +355,7 @@ def callback_listener(call):
         markup.add(types.InlineKeyboardButton("إلغاء ❌", callback_data="open_admin"))
         bot.send_message(call.message.chat.id, msg_text, parse_mode="Markdown", reply_markup=markup)
 
-# --- 3. معالجة المدخلات ---
+# --- 3. معالجة المدخلات للمطور ---
 @bot.message_handler(content_types=['text', 'photo'], func=lambda message: is_authorized(message) and message.from_user.id in user_states)
 def handle_developer_inputs(message):
     state = user_states[message.from_user.id]
@@ -407,7 +411,7 @@ def handle_developer_inputs(message):
     if message.chat.type == 'private':
         show_admin_panel(message.chat.id)
 
-# --- 4. البحث وتحميل الصوت (تم التحديث لزيادة السرعة) ---
+# --- 4. المحرك الأساسي للتحميل (يوتيوب + تيك توك) ---
 def progress_hook(d, message, sent_msg, title):
     if d['status'] == 'downloading':
         p = d.get('_percent_str', '0%')
@@ -415,138 +419,107 @@ def progress_hook(d, message, sent_msg, title):
         try:
             percent_clean = float(''.join(c for c in p if c.isdigit() or c == '.'))
             filled = int(percent_clean / (100 / bar_length))
-        except:
-            filled = 0
-            
+        except: filled = 0
         bar = "●" * filled + "○" * (bar_length - filled)
-        
-        process_text = (
-            f"**📥 Down: {bar} {p}**\n"
-            f"**🎵 {title[:30]}...**\n"
-            f"**⚡ Processing audio...**"
-        )
-        
-        try:
-            bot.edit_message_text(process_text, message.chat.id, sent_msg.message_id, parse_mode="Markdown")
+        process_text = f"**📥 Down: {bar} {p}**\n**🎵 {title[:25]}...**"
+        try: bot.edit_message_text(process_text, message.chat.id, sent_msg.message_id, parse_mode="Markdown")
         except: pass
 
-@bot.message_handler(func=lambda message: message.text and any(message.text.lower().startswith(cmd) for cmd in ["يوت ", "y ", "yt ", "ewt "]))
-def search_and_download(message):
+def smart_download(message, url, is_search=False, search_title=""):
     settings = load_settings()
+    sent_msg = bot.send_message(message.chat.id, "**⏳ جاري المعالجة...**", parse_mode="Markdown")
     
-    not_subbed = check_subscription(message.from_user.id)
-    if not_subbed and not is_authorized(message):
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for c in not_subbed:
-            markup.add(types.InlineKeyboardButton(f"انضم للقناة 📢", url=f"https://t.me/{c.replace('@','')}"))
-        markup.add(types.InlineKeyboardButton("تحقق من الاشتراك ✅", callback_data="verify_sub"))
-        bot.reply_to(message, f"⚠️ **{settings['sub_msg']}**", reply_markup=markup, parse_mode="Markdown")
-        return
+    # تحديد ملف الكوكيز المناسب
+    active_cookies = TT_COOKIES if "tiktok.com" in url else YT_COOKIES
+    file_id = f"audio_{message.from_user.id}_{sent_msg.message_id}"
 
-    if not settings.get('bot_status', True) and not is_authorized(message):
-        bot.reply_to(message, "**عذراً، الخدمة تحت الصيانة حالياً.**", parse_mode="Markdown")
-        return
-
-    parts = message.text.split(" ", 1)
-    if len(parts) < 2:
-        bot.reply_to(message, "**⚠️ أرسل اسم المقطع.**\nمثال: `y Alan Walker` ", parse_mode="Markdown")
-        return
-    
-    query = parts[1].strip()
-    
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except: pass
-
-    sent_msg = bot.send_message(message.chat.id, f"**🔍 Searching: {query}...**", parse_mode="Markdown")
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': f"{file_id}.%(ext)s",
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        'cookiefile': active_cookies if os.path.exists(active_cookies) else None,
+        'progress_hooks': [lambda d: progress_hook(d, message, sent_msg, search_title if is_search else "Audio")],
+        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '128'}],
+        'external_downloader': 'aria2c',
+        'external_downloader_args': ['-x', '16', '-s', '16'],
+    }
 
     try:
-        search_results = YoutubeSearch(query, max_results=1).to_dict()
-        if not search_results:
-            bot.edit_message_text(f"**❌ No results found.**", message.chat.id, sent_msg.message_id, parse_mode="Markdown")
-            return
-
-        video_info = search_results[0]
-        video_url = "https://www.youtube.com" + video_info['url_suffix']
-        file_id = video_info['id']
-        title = video_info['title']
-
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': f"{file_id}.%(ext)s",
-            'noplaylist': True,
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'extract_flat': False,
-            'geo_bypass': True,
-            'cachedir': False,
-            'progress_hooks': [lambda d: progress_hook(d, message, sent_msg, title)],
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '128',
-            }],
-            'external_downloader': 'aria2c',
-            'external_downloader_args': ['-x', '16', '-s', '16', '-k', '1M'],
-        }
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+            info = ydl.extract_info(url, download=True)
+            title = search_title if is_search else info.get('title', 'Hyper Audio')
         
         final_file = f"{file_id}.mp3"
         if os.path.exists(final_file):
-            bot.edit_message_text(f"**🚀 Uploading to Telegram...**", message.chat.id, sent_msg.message_id, parse_mode="Markdown")
-            
+            bot.edit_message_text(f"**🚀 جاري الرفع...**", message.chat.id, sent_msg.message_id, parse_mode="Markdown")
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("Source Channel 📢", url=f"https://t.me/{SOURCE_CHANNEL.replace('@','')}"))
+            markup.add(types.InlineKeyboardButton("قناة السورس 📢", url=f"https://t.me/{SOURCE_CHANNEL.replace('@','')}"))
 
             with open(final_file, 'rb') as audio:
-                bot.send_audio(
-                    message.chat.id, 
-                    audio, 
-                    title=title, 
-                    performer=settings.get('bot_name', 'Hyper'),
-                    reply_markup=markup,
-                    timeout=120
-                )
+                bot.send_audio(message.chat.id, audio, title=title, performer=settings.get('bot_name', 'Hyper'), reply_markup=markup)
             bot.delete_message(message.chat.id, sent_msg.message_id)
             os.remove(final_file)
-        else:
-            raise Exception("File extraction failed.")
-
+        else: raise Exception("لم يتم العثور على الملف.")
     except Exception as e:
-        bot.edit_message_text(f"**⚠️ Process Failed:**\n`{str(e)}`", message.chat.id, sent_msg.message_id, parse_mode="Markdown")
+        bot.edit_message_text(f"**❌ فشل الطلب:**\n`{str(e)[:100]}`", message.chat.id, sent_msg.message_id, parse_mode="Markdown")
 
-# --- 5. أوامر الإدارة السريعة والردود ---
 @bot.message_handler(func=lambda message: True)
-def all_messages_handler(message):
+def master_handler(message):
+    if not message.text: return
     settings = load_settings()
-    
-    if message.text and settings.get('bot_name', '') in message.text:
-        bot.reply_to(message, f"**نعم يا {message.from_user.first_name}، أنا بوت {settings['bot_name']} كيف يمكنني مساعدتك؟ ⚡**", parse_mode="Markdown")
+    register_user(message)
+
+    # 1. فحص الاشتراك للمستخدمين العاديين
+    if not is_authorized(message):
+        not_subbed = check_subscription(message.from_user.id)
+        if not_subbed:
+            start(message)
+            return
+        if not settings.get('bot_status', True):
+            bot.reply_to(message, "**🔴 الخدمة متوقفة حالياً للصيانة.**")
+            return
+
+    # 2. الكشف عن الروابط (تيك توك / يوتيوب)
+    links = re.findall(r'(https?://(?:www\.)?(?:youtube\.com|youtu\.be|tiktok\.com|vm\.tiktok\.com)/[^\s]+)', message.text)
+    if links:
+        smart_download(message, links[0])
         return
 
+    # 3. الكشف عن أوامر البحث
+    prefixes = ["يوت ", "y ", "yt ", "ewt "]
+    if any(message.text.lower().startswith(p) for p in prefixes):
+        query = message.text.split(" ", 1)[1]
+        sent_search = bot.send_message(message.chat.id, f"**🔍 جاري البحث عن: {query}...**", parse_mode="Markdown")
+        try:
+            results = YoutubeSearch(query, max_results=1).to_dict()
+            if results:
+                v_url = "https://www.youtube.com" + results[0]['url_suffix']
+                v_title = results[0]['title']
+                bot.delete_message(message.chat.id, sent_search.message_id)
+                smart_download(message, v_url, is_search=True, search_title=v_title)
+            else: bot.edit_message_text("❌ لم يتم العثور على نتائج.", message.chat.id, sent_search.message_id)
+        except Exception as e: bot.edit_message_text(f"⚠️ خطأ بحث: {e}", message.chat.id, sent_search.message_id)
+        return
+
+    # 4. أوامر المطور السريعة والردود
     if is_authorized(message):
         if message.text == "تفعيل":
             settings['bot_status'] = True
             save_settings(settings)
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("قناة السورس 📢", url=f"https://t.me/{SOURCE_CHANNEL.replace('@','')}"))
-            bot.reply_to(message, "**✅ تم تفعيل كافة خدمات البوت بنجاح!**", reply_markup=markup, parse_mode="Markdown")
-            
+            bot.reply_to(message, "✅ تم تفعيل البوت.")
         elif message.text == "تعطيل":
             settings['bot_status'] = False
             save_settings(settings)
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("إعادة تشغيل 🔄", callback_data="activate_from_group"))
-            bot.reply_to(message, "**🔴 تم تعطيل خدمات البوت، سيتم رفض كافة الطلبات الآن.**", reply_markup=markup, parse_mode="Markdown")
-            
+            bot.reply_to(message, "🔴 تم تعطيل البوت.")
         elif message.text == "غادر":
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("المطور 👤", url=f"https://t.me/{settings['dev_user'].replace('@','')}"))
-            bot.reply_to(message, "**👋 بناءً على طلب المطور، سأقوم بمغادرة هذه الدردشة الآن. وداعاً!**", reply_markup=markup, parse_mode="Markdown")
+            bot.reply_to(message, "👋 مغادرة...")
             bot.leave_chat(message.chat.id)
+        elif settings.get('bot_name', '') in message.text:
+            bot.reply_to(message, f"نعم يا {message.from_user.first_name}، أنا هنا! ⚡")
 
-print("Bot is running successfully with the new updates...")
+print("V6 PRO ULTRA is now running perfectly...")
 bot.infinity_polling()
