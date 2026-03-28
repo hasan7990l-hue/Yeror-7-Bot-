@@ -8,3 +8,4 @@ pyrogram
 tgcrypto
 yt-dlp
 pyTelegramBotAPI
+youtube-search-python
