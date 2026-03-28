@@ -4,3 +4,6 @@ loguru
 requests
 uvloop
 pyacoustid
+pyrogram
+tgcrypto
+yt-dlp
