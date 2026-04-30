@@ -39,12 +39,10 @@ async def start(client, message):
         "• مطور البوت: Hassan\n"
         "• قناة المطور: @lb2_c"
     )
-    # رابط الصورة المستخدمة في الترحيب
-    photo_url = "https://telegra.ph/file/060e132930263f3869062.jpg"
     
-    await message.reply_photo(
-        photo=photo_url,
-        caption=welcome_text,
+    # تم تغيير reply_photo إلى reply_text لإزالة الاعتماد على الروابط
+    await message.reply_text(
+        text=welcome_text,
         reply_markup=main_buttons
     )
 
@@ -54,8 +52,9 @@ async def callback_handler(client, callback_query: CallbackQuery):
     data = callback_query.data
 
     if data == "main_menu":
-        await callback_query.edit_message_caption(
-            caption="أهلاً بك في القائمة الرئيسية للمكتبات 🚀\nاختر القسم الذي تريده من الأسفل:",
+        # تم استخدام edit_message_text بدلاً من edit_message_caption لأن الرسالة أصبحت نصية
+        await callback_query.edit_message_text(
+            text="أهلاً بك في القائمة الرئيسية للمكتبات 🚀\nاختر القسم الذي تريده من الأسفل:",
             reply_markup=main_buttons
         )
 
@@ -69,7 +68,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "`pip install numpy`\n"
             "`pip install colorama`"
         )
-        await callback_query.edit_message_caption(caption=text, reply_markup=back_markup)
+        await callback_query.edit_message_text(text=text, reply_markup=back_markup)
 
     elif data == "trading_libs":
         text = (
@@ -79,7 +78,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "`pip install MetaTrader5`\n"
             "`pip install yfinance`"
         )
-        await callback_query.edit_message_caption(caption=text, reply_markup=back_markup)
+        await callback_query.edit_message_text(text=text, reply_markup=back_markup)
 
     elif data == "tg_libs":
         text = (
@@ -89,7 +88,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "`pip install telebot`\n"
             "`pip install python-telegram-bot`"
         )
-        await callback_query.edit_message_caption(caption=text, reply_markup=back_markup)
+        await callback_query.edit_message_text(text=text, reply_markup=back_markup)
 
     elif data == "ai_libs":
         text = (
@@ -99,7 +98,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "`pip install torch`\n"
             "`pip install scikit-learn`"
         )
-        await callback_query.edit_message_caption(caption=text, reply_markup=back_markup)
+        await callback_query.edit_message_text(text=text, reply_markup=back_markup)
 
     elif data == "termux_cmds":
         text = (
@@ -109,7 +108,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "`pkg install git`\n"
             "`pkg install wget`"
         )
-        await callback_query.edit_message_caption(caption=text, reply_markup=back_markup)
+        await callback_query.edit_message_text(text=text, reply_markup=back_markup)
 
 # --- بدء تشغيل البوت ---
 if __name__ == "__main__":
