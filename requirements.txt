@@ -1,0 +1,4 @@
+pyrogram
+tgcrypto
+worker: python bot.py
+pyTelegramBotAPI
