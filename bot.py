@@ -3,10 +3,10 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 # --- إعدادات البوت الكاملة ---
-# ملاحظة: تم تحديث البيانات بناءً على طلبك الأخير
-API_ID = 27485469  # البيانات الجديدة التي أرسلتها
-API_HASH = "544459a0701b32741254945b08daebfe" # البيانات الجديدة التي أرسلتها
-BOT_TOKEN = "7547029199:AAEcU45nIdC38I-f3qZ6qV6_1O_7i0111mY" # توكن البوت الخاص بك
+# ملاحظة: تم تحديث التوكن بناءً على رسالتك الأخيرة
+API_ID = 27485469  
+API_HASH = "544459a0701b32741254945b08daebfe" 
+BOT_TOKEN = "8386513995:AAHBL3QdbshzTo-jLNq_jQQ7yV66ycSv8Rs" # التوكن الجديد
 OWNER_ID = 8456056018 # الآيدي الخاص بك
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
