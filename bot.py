@@ -2,11 +2,12 @@ import os
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-# --- إعدادات البوت ---
-# ملاحظة: تأكد من وضع التوكن والـ API بداخل الكود أو كمتغيرات بيئة في Railway
-API_ID = 26425946  # اتركها كما هي أو حدثها حسب حسابك
-API_HASH = "8156644f12f00a582379f8263539e09d"
-BOT_TOKEN = "7547029199:AAEcU45nIdC38I-f3qZ6qV6_1O_7i0111mY" # التوكن الخاص بك
+# --- إعدادات البوت الكاملة ---
+# تم تحديث API_ID و API_HASH بناءً على بياناتك الجديدة
+API_ID = 27485469  
+API_HASH = "544459a0701b32741254945b08daebfe" 
+BOT_TOKEN = "7547029199:AAEcU45nIdC38I-f3qZ6qV6_1O_7i0111mY" # توكن البوت الخاص بك
+OWNER_ID = 8456056018 # الآيدي الخاص بك
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -29,19 +30,25 @@ back_markup = InlineKeyboardMarkup([
 @app.on_message(filters.command("start"))
 async def start(client, message):
     user_name = message.from_user.first_name
+    user_id = message.from_user.id
     welcome_text = (
         f"أهلاً بك يا {user_name} في بوت المكتبات 🚀\n\n"
         "هذا البوت يوفر لك كل اختصارات تثبيت المكتبات البرمجية بضغطة واحدة.\n\n"
+        f"• ايدي حسابك: `{user_id}`\n"
+        f"• ايدي المطور المثبت: `{OWNER_ID}`\n"
         "• مطور البوت: Hassan\n"
         "• قناة المطور: @lb2_c"
     )
+    # رابط الصورة المستخدمة في الترحيب
+    photo_url = "https://telegra.ph/file/060e132930263f3869062.jpg"
+    
     await message.reply_photo(
-        photo="https://telegra.ph/file/060e132930263f3869062.jpg", # يمكنك تغيير الرابط لصورتك
+        photo=photo_url,
         caption=welcome_text,
         reply_markup=main_buttons
     )
 
-# --- معالج ضغطات الأزرار (هذا هو الجزء المسؤول عن تشغيل الأزرار) ---
+# --- معالج ضغطات الأزرار (Callback Query Handler) ---
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
     data = callback_query.data
@@ -104,6 +111,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
         )
         await callback_query.edit_message_caption(caption=text, reply_markup=back_markup)
 
-# --- تشغيل البوت ---
-print("البوت يعمل الآن بنجاح...")
-app.run()
+# --- بدء تشغيل البوت ---
+if __name__ == "__main__":
+    print("البوت يعمل الآن بنجاح على سيرفر Railway...")
+    app.run()
