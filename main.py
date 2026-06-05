@@ -937,29 +937,37 @@ def run_web_server():
     # تشغيل السيرفر بشكل مباشر ومتوافق مع الخيوط المستقلة
     web.run_app(app, host='0.0.0.0', port=port, loop=loop, handle_signals=False)
 
+async def start_telegram_bot():
+    """
+    تشغيل جلسة اتصال البوت بداخل حلقة حدث معزولة كلياً لمنع تصادم المهام الرقمية.
+    """
+    try:
+        await bot.start(bot_token=BOT_TOKEN)
+        await fetch_telegram_data()
+        
+        # ترحيب عند بدء التشغيل في الترمينال
+        print("=" * 50)
+        print(f"    اسم البوت: {bot_name}")
+        print(f"    اسم المطور المجلوب: {developer_name}")
+        print(f"    اسم القناة المجلوب: {channel_name}")
+        print("    Developed by Engineer: Hyper")
+        print("=" * 50)
+        
+        await bot.run_until_disconnected()
+    except Exception as e:
+        print(f"[-] خطأ حرج أثناء تشغيل البوت: {e}")
+
 async def main():
     """
-    الدالة الرئيسية لبدء اتصال البوت بعد إقلاع سيرفر الويب المعزول بالخلفية كلياً.
+    الدالة الرئيسية للتحكم بإقلاع السيرفر وتغذية الـ Tasks.
     """
     # 1. تشغيل سيرفر الويب فوراً في Thread منفصل لكي تستجيب الحاوية لمنصة Back4app دون أي تأخير
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     print("[🌐] تم إقلاع خادم الويب بنجاح كمسار مستقل بالخلفية.")
 
-    # 2. بدء جلسة البوت والاتصال بسيرفرات تيليجرام
-    await bot.start(bot_token=BOT_TOKEN)
-    await fetch_telegram_data()
-    
-    # ترحيب عند بدء التشغيل في الترمينال
-    print("=" * 50)
-    print(f"    اسم البوت: {bot_name}")
-    print(f"    اسم المطور المجلوب: {developer_name}")
-    print(f"    اسم القناة المجلوب: {channel_name}")
-    print("    Developed by Engineer: Hyper")
-    print("=" * 50)
-
-    # 3. الحفاظ على تشغيل الـ Loop والانتظار حتى انتهاء الاتصال بالبوت
-    await bot.run_until_disconnected()
+    # 2. إنشاء مهمة منفصلة لبدء البوت لضمان عدم حدوث تجميد أو تعليق للـ Loop الأساسي
+    await start_telegram_bot()
 
 # تشغيل البوت عبر دالة الـ main
 if __name__ == '__main__':
