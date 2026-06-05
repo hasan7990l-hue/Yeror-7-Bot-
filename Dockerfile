@@ -7,6 +7,8 @@ WORKDIR /app
 # تثبيت المكتبات النظامية الضرورية (خاصة ffmpeg لمعالجة الفيديو)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    build-essential \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # نسخ ملف المتطلبات أولاً لتحسين سرعة البناء (Caching)
