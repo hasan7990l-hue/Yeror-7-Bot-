@@ -9,7 +9,7 @@ from yt_dlp import YoutubeDL
 from aiohttp import web  # استيراد مكتبة الويب لمنع توقف البوت
 
 # --- البيانات الخاصة بك (مدمجة بالكامل بدون تغيير) ---
-BOT_TOKEN = "8386513995:AAE1EzgXIUwVz4YYs31pp3iwAyixQjerUxA"
+BOT_TOKEN = "8386513995:AAHglQMPVwWLV0Tl7aPa9My9Gsj_WkULCE0"
 API_ID = 27485469
 API_HASH = "544459a0701b32741254945b08daebfe"
 DEVELOPER_USER = "@Eror_7"
