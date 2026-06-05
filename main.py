@@ -4,12 +4,13 @@ import asyncio
 import json
 import telethon
 import random
+import threading  # استيراد مكتبة المسارات لتشغيل السيرفر بالخلفية بأمان
 from telethon import TelegramClient, events, Button
 from yt_dlp import YoutubeDL
 from aiohttp import web  # استيراد مكتبة الويب لمنع توقف البوت
 
 # --- البيانات الخاصة بك (مدمجة بالكامل بدون تغيير) ---
-BOT_TOKEN = "8386513995:AAHglQMPVwWLV0Tl7aPa9My9Gsj_WkULCE0"
+BOT_TOKEN = "8386513995:AAE1EzgXIUwVz4YYs31pp3iwAyixQjerUxA"
 API_ID = 27485469
 API_HASH = "544459a0701b32741254945b08daebfe"
 DEVELOPER_USER = "@Eror_7"
@@ -113,7 +114,7 @@ def load_settings():
         "users": {},          # "user_id": {"lang": "ar", "starts": 1, "username": "", "name": ""}
         "blocked_users": [],  # قائمة المستخدمين الذين حظروا البوت (تم كشفهم عبر الخطأ)
         "fsub_channels": [],  # أقصى حد 4 قنوات: [{"username": "@channel", "title": "القناة 1"}]
-        "welcome_media": None,# قاموس يحتوي على تفاصيل الميديا للواجهة الرئيسية لضمان التوافق مع JSON
+        "welcome_media": None,# قاموس يحتوي على تفاصيل الميديا للواجهة الرئيسية لضشان التوافق مع JSON
         "admin_media": None,  # قاموس يحتوي على تفاصيل الميديا للوحة التحكم لضمان التوافق مع JSON
         "fsub_media": None,   # قاموس يحتوي على تفاصيل الميديا لكليشة الاشتراك الإجباري لضمان التوافق مع JSON
         "total_blocks_count": 0 # عدد مرات رصد حظر البوت
@@ -919,16 +920,33 @@ async def callback_handler(event):
         await bot.send_message(event.chat_id, welcome_text, buttons=buttons)
 
 
-# --- نظام ويب مصغر مدمج لمنع توقف السكربت (Keep Alive Web Server) ---
-async def web_handle(request):
-    """الرد على طلبات الويب للتأكيد على أن البوت حي ويعمل بنجاح"""
-    return web.Response(text="Bot is running successfully 24/7!")
+# --- نظام ويب مستقل ومعزول هندسياً لمنع تعليق السكربت أو انهياره ---
+def run_web_server():
+    """تشغيل سيرفر الويب في دالة تقليدية لتمريرها داخل Thread مستقل"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def web_handle(request):
+        return web.Response(text="Bot is running successfully 24/7!")
+        
+    app = web.Application()
+    app.router.add_get('/', web_handle)
+    
+    port = int(os.environ.get("PORT", 7860))
+    
+    # تشغيل السيرفر بشكل مباشر ومتوافق مع الخيوط المستقلة
+    web.run_app(app, host='0.0.0.0', port=port, loop=loop, handle_signals=False)
 
 async def main():
     """
-    الدالة الرئيسية الموحدة لتشغيل سيرفر الويب وجلسة البوت معاً بشكل صحيح هندسياً يتوافق مع البيئات السحابية.
+    الدالة الرئيسية لبدء اتصال البوت بعد إقلاع سيرفر الويب المعزول بالخلفية كلياً.
     """
-    # 1. بدء جلسة البوت والاتصال
+    # 1. تشغيل سيرفر الويب فوراً في Thread منفصل لكي تستجيب الحاوية لمنصة Back4app دون أي تأخير
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    print("[🌐] تم إقلاع خادم الويب بنجاح كمسار مستقل بالخلفية.")
+
+    # 2. بدء جلسة البوت والاتصال بسيرفرات تيليجرام
     await bot.start(bot_token=BOT_TOKEN)
     await fetch_telegram_data()
     
@@ -939,16 +957,6 @@ async def main():
     print(f"    اسم القناة المجلوب: {channel_name}")
     print("    Developed by Engineer: Hyper")
     print("=" * 50)
-
-    # 2. إعداد وتشغيل سيرفر الويب كمهمة خلفية مدمجة بالـ Loop الأساسي هندسياً
-    app = web.Application()
-    app.router.add_get('/', web_handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 7860))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"[🌐] تم تشغيل نظام الويب بنجاح على المنفذ المخصص: {port}")
 
     # 3. الحفاظ على تشغيل الـ Loop والانتظار حتى انتهاء الاتصال بالبوت
     await bot.run_until_disconnected()
