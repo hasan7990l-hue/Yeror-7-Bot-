@@ -20,5 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # نسخ باقي ملفات المشروع إلى الحاوية
 COPY . .
 
+# فتح منفذ خادم الويب رقم 7860 ليتوافق مع السكربت والبيئات السحابية
+EXPOSE 7860
+
 # أمر تشغيل البوت
 CMD ["python", "main.py"]
