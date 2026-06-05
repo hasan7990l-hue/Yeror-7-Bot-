@@ -844,7 +844,7 @@ async def callback_handler(event):
     elif data.startswith(b"conf_del_"):
         if user_id != OWNER_ID:
             return
-        await event.delete() # التعديل بالحذف الكامل
+        await event.delete() # التعديل بالحذف الكامل قبل الانتقال لإدخال الميديا
         ch_idx = int(data.decode('utf-8').split('_')[2])
         fsub_list = bot_data.get("fsub_channels", [])
         
@@ -920,32 +920,31 @@ async def callback_handler(event):
         await bot.send_message(event.chat_id, welcome_text, buttons=buttons)
 
 
-# --- نظام ويب مستقل ومعزول هندسياً لمنع تعليق السكربت أو انهياره ---
-def run_web_server():
-    """تشغيل سيرفر الويب في دالة تقليدية لتمريرها داخل Thread مستقل"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async def web_handle(request):
-        return web.Response(text="Bot is running successfully 24/7!")
-        
+# --- نظام ويب معالج هندسياً بالكامل لمنع تصادم الـ Loops ---
+async def web_handle(request):
+    """الاستجابة لطلبات فحص المنصة السحابية للبقاء متصلاً"""
+    return web.Response(text="Bot is running successfully 24/7!")
+
+async def main():
+    """
+    الدالة الرئيسية للتحكم بإقلاع السيرفر وتغذية المهام على نفس حلقة الأحداث.
+    """
+    # 1. إعداد خادم الويب متوافقاً مع حلقة الأحداث المشتركة لتفادي انهيار بيئة العمل
     app = web.Application()
     app.router.add_get('/', web_handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
     
     port = int(os.environ.get("PORT", 7860))
-    
-    # تشغيل السيرفر بشكل مباشر ومتوافق مع الخيوط المستقلة
-    web.run_app(app, host='0.0.0.0', port=port, loop=loop, handle_signals=False)
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"[🌐] تم إقلاع خادم الويب بنجاح على المنفذ {port} ومشاركته بالخلفية.")
 
-async def start_telegram_bot():
-    """
-    تشغيل جلسة اتصال البوت بداخل حلقة حدث معزولة كلياً لمنع تصادم المهام الرقمية.
-    """
+    # 2. تشغيل اتصال البوت وجلب البيانات الأساسية
     try:
         await bot.start(bot_token=BOT_TOKEN)
         await fetch_telegram_data()
         
-        # ترحيب عند بدء التشغيل في الترمينال
         print("=" * 50)
         print(f"    اسم البوت: {bot_name}")
         print(f"    اسم المطور المجلوب: {developer_name}")
@@ -953,23 +952,12 @@ async def start_telegram_bot():
         print("    Developed by Engineer: Hyper")
         print("=" * 50)
         
+        # إبقاء البوت معلقاً للاستماع إلى التحديثات دون تجميد للسيرفر
         await bot.run_until_disconnected()
     except Exception as e:
         print(f"[-] خطأ حرج أثناء تشغيل البوت: {e}")
 
-async def main():
-    """
-    الدالة الرئيسية للتحكم بإقلاع السيرفر وتغذية الـ Tasks.
-    """
-    # 1. تشغيل سيرفر الويب فوراً في Thread منفصل لكي تستجيب الحاوية لمنصة Back4app دون أي تأخير
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-    print("[🌐] تم إقلاع خادم الويب بنجاح كمسار مستقل بالخلفية.")
-
-    # 2. إنشاء مهمة منفصلة لبدء البوت لضمان عدم حدوث تجميد أو تعليق للـ Loop الأساسي
-    await start_telegram_bot()
-
-# تشغيل البوت عبر دالة الـ main
+# تشغيل السكربت من خلال حلقة الأحداث الأساسية
 if __name__ == '__main__':
     try:
         asyncio.run(main())
