@@ -1,4 +1,4 @@
 flask
-nest_asyncio
 telethon
-yt-dlp>=2025.01.01
+yt-dlp
+aiohttp
