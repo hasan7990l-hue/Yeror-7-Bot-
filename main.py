@@ -37,6 +37,14 @@ except ImportError:
     print("[!] ثبّت: pip install python-telegram-bot")
     sys.exit(1)
 
+# ------------------- مكتبة Flask (للـ Vercel / Webhook) -------------------
+try:
+    from flask import Flask, request, jsonify
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
+    print("[!] Flask غير مثبتة، سيتم تشغيل البوت في وضع polling فقط.")
+
 # ------------------- الإعدادات -------------------
 CONFIG_FILE = "signal_config.json"
 CREDENTIALS_FILE = "pocket_credentials.json"
@@ -488,20 +496,77 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ تم تعيين القناة إلى: <code>{channel}</code>", parse_mode="HTML")
         await start_command(update, context)
 
+# ------------------- دوال Flask (لـ Vercel / Webhook) -------------------
+# يتم إنشاء تطبيق Flask فقط إذا كانت المكتبة متوفرة
+if FLASK_AVAILABLE:
+    flask_app = Flask(__name__)
+    
+    # تهيئة البوت لـ Webhook
+    webhook_application = Application.builder().token(BOT_TOKEN).build()
+    webhook_application.add_handler(CommandHandler("start", start_command))
+    webhook_application.add_handler(CallbackQueryHandler(button_handler))
+    webhook_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    @flask_app.route('/webhook', methods=['POST'])
+    async def webhook():
+        """نقطة نهاية Webhook لتلقي التحديثات من Telegram."""
+        try:
+            update = Update.de_json(request.get_json(force=True), webhook_application.bot)
+            await webhook_application.process_update(update)
+            return jsonify({"status": "ok"})
+        except Exception as e:
+            print(f"[!] خطأ في Webhook: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+    
+    @flask_app.route('/', methods=['GET'])
+    def index():
+        return "🤖 Bot is running on Vercel with Webhook!", 200
+    
+    # متغير app المطلوب من Vercel
+    app = flask_app
+    
+    # تسجيل Webhook تلقائياً (يُفضل تنفيذه مرة واحدة)
+    def set_webhook():
+        import requests
+        webhook_url = os.environ.get("WEBHOOK_URL", "https://yeror-7-bot.vercel.app/webhook")
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
+        try:
+            resp = requests.get(url)
+            print(f"[*] Webhook registration: {resp.json()}")
+        except Exception as e:
+            print(f"[!] فشل تسجيل Webhook: {e}")
+    
+    # محاولة تسجيل Webhook عند بدء التشغيل (لكن Vercel قد لا ينفذ هذا)
+    # يمكنك تنفيذها يدوياً أو عبر `__init__`
+else:
+    # إذا لم تكن Flask متوفرة، استخدم الوضع العادي
+    app = None
+
 # ------------------- التشغيل -------------------
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # الوضع المحلي: يستخدم polling إذا لم يكن في بيئة Vercel
+    if not os.environ.get("VERCEL") and not os.environ.get("FLASK_APP"):
+        application = Application.builder().token(BOT_TOKEN).build()
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("🤖 بوت الإشارات يعمل...")
-    try:
-        application.run_polling()
-    except KeyboardInterrupt:
-        print("\n[!] تم إيقاف البوت بواسطة المستخدم.")
-        publisher.stop()
-        sys.exit(0)
+        print("🤖 بوت الإشارات يعمل (Polling)...")
+        try:
+            application.run_polling()
+        except KeyboardInterrupt:
+            print("\n[!] تم إيقاف البوت بواسطة المستخدم.")
+            publisher.stop()
+            sys.exit(0)
+    else:
+        # في بيئة Vercel، يتم تشغيل Flask app عبر متغير app
+        print("🤖 بوت الإشارات يعمل (Webhook / Vercel)...")
+        # تسجيل Webhook (يُنصح بتنفيذها يدوياً)
+        if FLASK_AVAILABLE and os.environ.get("VERCEL"):
+            set_webhook()
 
 if __name__ == "__main__":
-    main()
+    # في Vercel، يتم استدعاء app مباشرة، وليس main()
+    # لكننا نضع main() للتشغيل المحلي
+    if not os.environ.get("VERCEL"):
+        main()
