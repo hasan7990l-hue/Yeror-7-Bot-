@@ -15,18 +15,31 @@ os.makedirs(TMP_DIR, exist_ok=True)
 os.environ["HOME"] = TMP_DIR
 os.environ["TMPDIR"] = TMP_DIR
 
+# محاولة إعادة توجيه مسار مجلد history الخاص بمكتبة pocketoptionapi (إن كانت تدعم)
+os.environ.setdefault("POCKETOPTION_HISTORY_PATH", TMP_DIR)
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
+# --- تحسين محاولات الاستيراد بحيث تلتقط جميع الأخطاء (بما فيها PermissionError) ---
+LIB_TYPE = "none"
+
 try:
-    from pocketoptionapi.stable_api import PocketOption
+    # المحاولة الأولى: استخدام pocketoptionapi2 (غالباً لا تعاني من مشكلة المجلد)
+    from pocketoptionapi2.stable_api import PocketOption
     LIB_TYPE = "pocketoptionapi2"
-except ImportError:
+except Exception:
     try:
-        from pocket_option import PocketOptionClient, AuthorizationData
-        LIB_TYPE = "pocket_option"
-    except ImportError:
-        LIB_TYPE = "none"
+        # المحاولة الثانية: استخدام pocketoptionapi العادية (قد تسبب مشكلة لكن نحاول)
+        from pocketoptionapi.stable_api import PocketOption
+        LIB_TYPE = "pocketoptionapi"
+    except Exception:
+        try:
+            # المحاولة الثالثة: استخدام مكتبة بديلة إن وجدت
+            from pocket_option import PocketOptionClient, AuthorizationData
+            LIB_TYPE = "pocket_option"
+        except Exception:
+            LIB_TYPE = "none"
 
 # استخدام مجلد /tmp لحفظ ملفات الإعدادات وتجنب خطأ PermissionError
 CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
@@ -100,11 +113,16 @@ class SignalPublisher:
 
     def connect(self) -> bool:
         try:
-            if LIB_TYPE == "pocketoptionapi2":
+            if LIB_TYPE in ("pocketoptionapi2", "pocketoptionapi"):
                 self.client = PocketOption(demo=True)
                 self.client.connect()
                 self.connected = True
                 return True
+            elif LIB_TYPE == "pocket_option":
+                # يمكن إضافة كود الاتصال الخاص بالمكتبة البديلة هنا إن لزم
+                # self.client = PocketOptionClient(...)
+                self.connected = False
+                return False
         except Exception:
             pass
         self.connected = False
