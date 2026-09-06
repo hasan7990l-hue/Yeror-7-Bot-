@@ -1,1 +1,2 @@
-
+pocketoptionapi2==0.1.1
+python-telegram-bot==20.8
