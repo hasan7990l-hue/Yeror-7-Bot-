@@ -9,6 +9,12 @@ import threading
 from datetime import datetime
 from typing import Dict, List
 
+# --- معالجة صلاحيات الكتابة لمنصة Streamlit Cloud ---
+TMP_DIR = "/tmp/pocket_data"
+os.makedirs(TMP_DIR, exist_ok=True)
+os.environ["HOME"] = TMP_DIR
+os.environ["TMPDIR"] = TMP_DIR
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
@@ -22,8 +28,9 @@ except ImportError:
     except ImportError:
         LIB_TYPE = "none"
 
-CONFIG_FILE = "signal_config.json"
-CREDENTIALS_FILE = "pocket_credentials.json"
+# استخدام مجلد /tmp لحفظ ملفات الإعدادات وتجنب خطأ PermissionError
+CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
+CREDENTIALS_FILE = os.path.join(TMP_DIR, "pocket_credentials.json")
 BOT_TOKEN = "8604552604:AAHcgisRhhpDVi4wXj29EFooNEBH-AKEfcA"
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
@@ -45,15 +52,24 @@ DEFAULT_CONFIG = {
 
 def load_config() -> Dict:
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(DEFAULT_CONFIG, f, indent=2)
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=2)
+    except Exception:
+        pass
     return DEFAULT_CONFIG
 
 def save_config(config: Dict):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception:
+        pass
 
 def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Dict:
     if not candles or len(candles) < long_period + 1:
@@ -199,7 +215,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 البوت يعمل على Hugging Face...")
+    print("🤖 البوت يعمل الآن...")
     app.run_polling()
 
 if __name__ == "__main__":
