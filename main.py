@@ -40,7 +40,7 @@ except ImportError:
 # ------------------- الإعدادات -------------------
 CONFIG_FILE = "signal_config.json"
 CREDENTIALS_FILE = "pocket_credentials.json"
-BOT_TOKEN = "8604552604:AAHcgisRhhpDVi4wXj29EFooNEBH-AKEfcA"
+BOT_TOKEN = "8604552604:AAHwikPup65nkkv6xLzJEOhYO4jY5PJAS1M"
 
 FOREX_SYMBOLS = [
     "EURUSD-OTC",
