@@ -1,3 +1,0 @@
-BOT_TOKEN = required_env("8604552604:AAHwikPup65nkkv6xLzJEOhYO4jY5PJAS1M")
-API_ID = int(required_env("27485469"))
-API_HASH = required_env("544459a0701b32741254945b08daebfe")
