@@ -40,7 +40,11 @@ except ImportError:
 # ------------------- الإعدادات -------------------
 CONFIG_FILE = "signal_config.json"
 CREDENTIALS_FILE = "pocket_credentials.json"
-BOT_TOKEN = "8604552604:AAHwikPup65nkkv6xLzJEOhYO4jY5PJAS1M"
+BOT_TOKEN = "8604552604:AAHcgisRhhpDVi4wXj29EFooNEBH-AKEfcA"
+
+# ------------------- بيانات API للمطور (تمت الإضافة) -------------------
+API_ID = 27485469
+API_HASH = "544459a0701b32741254945b08daebfe"
 
 FOREX_SYMBOLS = [
     "EURUSD-OTC",
