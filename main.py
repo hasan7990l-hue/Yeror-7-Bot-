@@ -44,7 +44,7 @@ except Exception:
 # استخدام مجلد /tmp لحفظ ملفات الإعدادات وتجنب خطأ PermissionError
 CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
 CREDENTIALS_FILE = os.path.join(TMP_DIR, "pocket_credentials.json")
-BOT_TOKEN = "8604552604:AAEfDHlh6oXTDTnK5K-q3bc0fAAh7zOxhNU"
+BOT_TOKEN = "8604552604:AAHcgisRhhpDVi4wXj29EFooNEBH-AKEfcA"
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
 TRADE_DURATIONS = [60, 120, 300]
@@ -115,17 +115,42 @@ class SignalPublisher:
         try:
             if LIB_TYPE in ("pocketoptionapi2", "pocketoptionapi"):
                 self.client = PocketOption(demo=True)
-                # استخدام المفاتيح المحددة للاتصال
-                self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
-                self.connected = True
-                return True
+                # محاولة الاتصال بثلاث طرق مختلفة مع طباعة الأخطاء
+                try:
+                    # الطريقة الأولى: تمرير المعاملات مباشرة في connect
+                    self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
+                    self.connected = True
+                    return True
+                except Exception as e1:
+                    print(f"[خطأ] طريقة connect بالمعاملات فشلت: {e1}")
+                    try:
+                        # الطريقة الثانية: استخدام set_session أولاً ثم connect
+                        self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
+                        self.client.connect()
+                        self.connected = True
+                        return True
+                    except Exception as e2:
+                        print(f"[خطأ] طريقة set_session فشلت: {e2}")
+                        try:
+                            # الطريقة الثالثة: الاتصال بدون معاملات (طريقة قديمة)
+                            self.client.connect()
+                            self.connected = True
+                            return True
+                        except Exception as e3:
+                            print(f"[خطأ] طريقة connect بدون معاملات فشلت: {e3}")
+                            # محاولة رابعة: تعيين الجلسة بعد الاتصال
+                            try:
+                                self.client.connect()
+                                self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
+                                self.connected = True
+                                return True
+                            except Exception as e4:
+                                print(f"[خطأ] جميع المحاولات فشلت: {e4}")
             elif LIB_TYPE == "pocket_option":
-                # يمكن إضافة كود الاتصال الخاص بالمكتبة البديلة هنا إن لزم
-                # self.client = PocketOptionClient(...)
-                self.connected = False
-                return False
-        except Exception:
-            pass
+                # كود الاتصال للمكتبة البديلة إن وجدت
+                pass
+        except Exception as e:
+            print(f"[خطأ عام] {e}")
         self.connected = False
         return False
 
