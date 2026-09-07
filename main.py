@@ -44,7 +44,7 @@ except Exception:
 # استخدام مجلد /tmp لحفظ ملفات الإعدادات وتجنب خطأ PermissionError
 CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
 CREDENTIALS_FILE = os.path.join(TMP_DIR, "pocket_credentials.json")
-BOT_TOKEN = "8604552604:AAHcgisRhhpDVi4wXj29EFooNEBH-AKEfcA"
+BOT_TOKEN = "8604552604:AAEfDHlh6oXTDTnK5K-q3bc0fAAh7zOxhNU"
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
 TRADE_DURATIONS = [60, 120, 300]
