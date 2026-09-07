@@ -44,7 +44,7 @@ except Exception:
 # استخدام مجلد /tmp لحفظ ملفات الإعدادات وتجنب خطأ PermissionError
 CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
 CREDENTIALS_FILE = os.path.join(TMP_DIR, "pocket_credentials.json")
-BOT_TOKEN = "8604552604:AAEfDHlh6oXTDTnK5K-q3bc0fAAh7zOxhNU"
+BOT_TOKEN = "8604552604:AAHcgisRhhpDVi4wXj29EFooNEBH-AKEfcA"
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
 TRADE_DURATIONS = [60, 120, 300]
@@ -115,7 +115,8 @@ class SignalPublisher:
         try:
             if LIB_TYPE in ("pocketoptionapi2", "pocketoptionapi"):
                 self.client = PocketOption(demo=True)
-                self.client.connect()
+                # استخدام المفاتيح المحددة للاتصال
+                self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
                 self.connected = True
                 return True
             elif LIB_TYPE == "pocket_option":
@@ -229,13 +230,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = publisher.format_single_signal_message(publisher.selected_symbol, signal, publisher.selected_timeframe, publisher.selected_duration)
         await query.edit_message_text(msg, parse_mode="HTML")
 
+# ---- إضافة آلية القفل لتجنب تعارض عدة عمليات ----
+LOCK_FILE = "/tmp/bot.lock"
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 البوت يعمل الآن...")
-    # التعديل الوحيد: إضافة stop_signals=None لمنع خطأ الإشارات في Streamlit
-    app.run_polling(stop_signals=None)
+    # التحقق من وجود نسخة أخرى تعمل
+    if os.path.exists(LOCK_FILE):
+        print("⚠️ يوجد نسخة أخرى من البوت تعمل، إنهاء هذه النسخة.")
+        return
+
+    # إنشاء ملف القفل
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    try:
+        app = Application.builder().token(BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start_command))
+        app.add_handler(CallbackQueryHandler(button_handler))
+        print("🤖 البوت يعمل الآن...")
+        app.run_polling(stop_signals=None)
+    finally:
+        # حذف ملف القفل عند الخروج
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
 
 if __name__ == "__main__":
     main()
