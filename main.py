@@ -234,7 +234,8 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 البوت يعمل الآن...")
-    app.run_polling()
+    # التعديل الوحيد: إضافة stop_signals=None لمنع خطأ الإشارات في Streamlit
+    app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
     main()
