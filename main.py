@@ -6,11 +6,10 @@ import os
 import sys
 import time
 import threading
-import traceback  # <--- PATCH: إضافة مكتبة لالتقاط تفاصيل الأخطاء
+import traceback
 from datetime import datetime
 from typing import Dict, List
 
-# --- PATCH 1: إضافة مكتبة asyncio لدعم التنفيذ غير المتزامن الآمن (مع الحفاظ على كل السطور الأصلية) ---
 import asyncio
 
 # --- معالجة صلاحيات الكتابة لمنصة Streamlit Cloud ---
@@ -18,52 +17,39 @@ TMP_DIR = "/tmp/pocket_data"
 os.makedirs(TMP_DIR, exist_ok=True)
 os.environ["HOME"] = TMP_DIR
 os.environ["TMPDIR"] = TMP_DIR
-
-# محاولة إعادة توجيه مسار مجلد history الخاص بمكتبة pocketoptionapi (إن كانت تدعم)
 os.environ.setdefault("POCKETOPTION_HISTORY_PATH", TMP_DIR)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- تحسين محاولات الاستيراد بحيث تلتقط جميع الأخطاء (بما فيها PermissionError) ---
+# --- تحديد نوع المكتبة ---
 LIB_TYPE = "none"
-
 try:
-    # المحاولة الأولى: استخدام pocketoptionapi2 (غالباً لا تعاني من مشكلة المجلد)
     from pocketoptionapi2.stable_api import PocketOption
     LIB_TYPE = "pocketoptionapi2"
 except Exception:
     try:
-        # المحاولة الثانية: استخدام pocketoptionapi العادية (قد تسبب مشكلة لكن نحاول)
         from pocketoptionapi.stable_api import PocketOption
         LIB_TYPE = "pocketoptionapi"
     except Exception:
         try:
-            # المحاولة الثالثة: استخدام مكتبة بديلة إن وجدت
             from pocket_option import PocketOptionClient, AuthorizationData
             LIB_TYPE = "pocket_option"
         except Exception:
             LIB_TYPE = "none"
 
-# استخدام مجلد /tmp لحفظ ملفات الإعدادات وتجنب خطأ PermissionError
 CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
 CREDENTIALS_FILE = os.path.join(TMP_DIR, "pocket_credentials.json")
 
-# --- PATCH 2: تحديث المفتاح الجديد مع الاحتفاظ بالمتغير البيئي كخط احتياطي (لم نحذف السطر الأصلي) ---
-# السطر الأصلي (تم تعديل قيمته إلى المفتاح الجديد الذي أرسلته)
+# --- المفتاح الجديد (مضمن) ---
 SESSION = '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]'
-# إضافة قراءة من البيئة مع الاحتفاظ بالقيمة أعلاه كـ Fallback (لم نعطل السطر الأصلي)
 SESSION = os.environ.get("POCKET_SESSION", SESSION)
-
 UID = 27658142
-UID = int(os.environ.get("POCKET_UID", UID))  # إضافة قراءة البيئة مع الاحتفاظ بالسطر الأصلي
-
+UID = int(os.environ.get("POCKET_UID", UID))
 IS_DEMO = 1
 PLATFORM = 2
 
-# --- PATCH 3: إعطاء أولوية قصوى لمتغيرات البيئة دون حذف التوكن الأصلي (الأصل موجود ويبقى شغالاً) ---
 BOT_TOKEN = "8604552604:AAF_z6QkJo4GLaPqZ6MTZ56uppsEbytQJKg"
-# سطر الإصلاح: إذا وجد متغير بيئة بنفس الاسم، يستبدله، وإلا يبقي التوكن القديم شغالاً (لم نحذف السطر أعلاه)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", BOT_TOKEN)
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
@@ -126,32 +112,29 @@ class SignalPublisher:
         self.selected_symbol = self.config.get("selected_symbol", "EURUSD-OTC")
         self.selected_timeframe = self.config.get("selected_timeframe", 60)
         self.selected_duration = self.config.get("selected_duration", 60)
-        # --- PATCH 4: إضافة متغير لتخزين آخر خطأ فني (للإبلاغ عنه في التليجرام) ---
         self.last_error = None
         self.last_error_trace = None
 
-    # --- PATCH 5: دالة الاتصال الأصلية (لم نغير فيها ولا حرف، فقط أضفنا سطرين لتخزين الأخطاء) ---
     def connect(self) -> bool:
-        # إعادة تعيين الأخطاء السابقة
         self.last_error = None
         self.last_error_trace = None
-        
+
         try:
             if LIB_TYPE in ("pocketoptionapi2", "pocketoptionapi"):
-                self.client = PocketOption(demo=True)
-                # محاولة الاتصال بثلاث طرق مختلفة مع طباعة الأخطاء
+                # --- التصحيح الحاسم: إنشاء الكائن حسب نوع المكتبة ---
+                if LIB_TYPE == "pocketoptionapi":
+                    self.client = PocketOption(SESSION, demo=True)   # القديم يطلب ssid
+                else:
+                    self.client = PocketOption(demo=True)            # الجديد لا يطلب
+
                 try:
-                    # الطريقة الأولى: تمرير المعاملات مباشرة في connect
                     self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
                     self.connected = True
                     return True
                 except Exception as e1:
-                    # تخزين الخطأ الأول
                     self.last_error = f"طريقة 1 فشلت: {str(e1)}"
                     self.last_error_trace = traceback.format_exc()
-                    print(f"[خطأ] طريقة connect بالمعاملات فشلت: {e1}")
                     try:
-                        # الطريقة الثانية: استخدام set_session أولاً ثم connect
                         self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
                         self.client.connect()
                         self.connected = True
@@ -159,17 +142,13 @@ class SignalPublisher:
                     except Exception as e2:
                         self.last_error = f"طريقة 2 فشلت: {str(e2)}"
                         self.last_error_trace = traceback.format_exc()
-                        print(f"[خطأ] طريقة set_session فشلت: {e2}")
                         try:
-                            # الطريقة الثالثة: الاتصال بدون معاملات (طريقة قديمة)
                             self.client.connect()
                             self.connected = True
                             return True
                         except Exception as e3:
                             self.last_error = f"طريقة 3 فشلت: {str(e3)}"
                             self.last_error_trace = traceback.format_exc()
-                            print(f"[خطأ] طريقة connect بدون معاملات فشلت: {e3}")
-                            # محاولة رابعة: تعيين الجلسة بعد الاتصال
                             try:
                                 self.client.connect()
                                 self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
@@ -178,14 +157,11 @@ class SignalPublisher:
                             except Exception as e4:
                                 self.last_error = f"طريقة 4 فشلت: {str(e4)}"
                                 self.last_error_trace = traceback.format_exc()
-                                print(f"[خطأ] جميع المحاولات فشلت: {e4}")
             elif LIB_TYPE == "pocket_option":
-                # كود الاتصال للمكتبة البديلة إن وجدت
                 pass
         except Exception as e:
             self.last_error = f"خطأ عام في connect: {str(e)}"
             self.last_error_trace = traceback.format_exc()
-            print(f"[خطأ عام] {e}")
         self.connected = False
         return False
 
@@ -234,19 +210,15 @@ class SignalPublisher:
             f"📝 {signal['reason']}"
         )
 
-    # ================== PATCH 6: الطبقة التصحيحية الآمنة (ASYNC WRAPPERS) دون تعطيل الأصلي ==================
     async def async_connect(self):
-        """استدعاء آمن للاتصال في thread منفصل لتجنب تجميد البوت"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.connect)
 
     async def async_get_balance(self):
-        """استدعاء آمن للرصيد في thread منفصل"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.get_balance)
 
     async def async_generate_signal(self, symbol, timeframe):
-        """استدعاء آمن لتوليد الإشارة في thread منفصل"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.generate_signal_for_symbol, symbol, timeframe)
 
@@ -282,13 +254,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # ================== PATCH 7: معالجة الأزرار مع الاحتفاظ بكل سطور التنفيذ الأصلي ==================
     if data == "connect":
-        # ---- السطر الأصلي (موجود ولن نحذفه أو نعلقه) ----
-        # success = publisher.connect()  # كان سيتسبب بتجميد البوت، لكننا أبقيناه في الكود بشكل غير مفعل؟ لا، لا نعلقه.
-        # بدلاً من تعطيله، سنضعه داخل try/except ونضيف المسار الجديد بجانبه.
         try:
-            # تنفيذ السطر الأصلي كما هو (لن نمسحه)
             success = publisher.connect()
             if success:
                 await query.edit_message_text("✅ تم الاتصال (بالطريقة القديمة)!")
@@ -298,15 +265,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             publisher.last_error = f"فشل الاتصال القديم: {str(e_old)}"
             publisher.last_error_trace = traceback.format_exc()
         
-        # هنا نستدعي التصحيح الجديد (السطر المضاف)
         success_patched = await publisher.async_connect()
         if success_patched:
             await query.edit_message_text("✅ تم الاتصال (بالمعالج الآمن)!")
         else:
-            # --- PATCH 8: إرسال تقرير الخطأ المفصل إلى التليجرام ---
             error_msg = publisher.last_error or "سبب غير معروف"
             error_trace = publisher.last_error_trace or "لا يوجد تتبع"
-            # اختصار التتبع ليتناسب مع طول رسالة التليجرام (4000 حرف)
             if len(error_trace) > 500:
                 error_trace = error_trace[:500] + "...\n(تم اختصار التتبع)"
             
@@ -326,26 +290,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(full_error_report, parse_mode="HTML")
 
     elif data == "balance":
-        # ---- السطر الأصلي (موجود) ----
-        # if not publisher.connected: ... 
-        # سنترك المنطق الأصلي لكن نضيف مساراً جديداً.
         if not publisher.connected:
-            # محاولة إعادة الاتصال التلقائي عبر المسار الآمن كحل احتياطي
             await publisher.async_connect()
             if not publisher.connected:
                 error_msg = publisher.last_error or "البوت غير متصل ولا يوجد خطأ محدد"
                 await query.edit_message_text(f"⚠️ البوت غير متصل.\n\nالسبب المحتمل:\n<code>{error_msg}</code>", parse_mode="HTML")
                 return
-        # السطر الأصلي لسحب الرصيد (موجود)
-        # bal = publisher.get_balance()
         try:
-            bal = publisher.get_balance()  # السطر الأصلي
+            bal = publisher.get_balance()
             await query.edit_message_text(f"💰 الرصيد (قديم): {bal:.2f}$")
         except Exception as e_bal:
             print(f"[الأصل] فشل سحب الرصيد: {e_bal}")
             publisher.last_error = f"فشل سحب الرصيد (الأصل): {str(e_bal)}"
             publisher.last_error_trace = traceback.format_exc()
-            # المسار الجديد
             bal_new = await publisher.async_get_balance()
             if bal_new > 0:
                 await query.edit_message_text(f"💰 الرصيد (جديد/آمن): {bal_new:.2f}$")
@@ -367,25 +324,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ تم اختيار {symbol}. ارجع للقائمة الرئيسية عبر /start")
 
     elif data == "signal_now":
-        # ---- السطر الأصلي (موجود) ----
-        # if not publisher.connected: ...
         if not publisher.connected:
             await publisher.async_connect()
             if not publisher.connected:
                 error_msg = publisher.last_error or "البوت غير متصل"
                 await query.edit_message_text(f"⚠️ البوت غير متصل.\n\nالسبب:\n<code>{error_msg}</code>", parse_mode="HTML")
                 return
-        # السطر الأصلي لتوليد الإشارة
-        # signal = publisher.generate_signal_for_symbol(...)
         try:
-            signal = publisher.generate_signal_for_symbol(publisher.selected_symbol, publisher.selected_timeframe) # الأصلي
+            signal = publisher.generate_signal_for_symbol(publisher.selected_symbol, publisher.selected_timeframe)
             msg = publisher.format_single_signal_message(publisher.selected_symbol, signal, publisher.selected_timeframe, publisher.selected_duration)
             await query.edit_message_text(msg, parse_mode="HTML")
         except Exception as e_sig:
             print(f"[الأصل] فشل توليد الإشارة: {e_sig}")
             publisher.last_error = f"فشل توليد الإشارة (الأصل): {str(e_sig)}"
             publisher.last_error_trace = traceback.format_exc()
-            # المسار الجديد
             signal_new = await publisher.async_generate_signal(publisher.selected_symbol, publisher.selected_timeframe)
             if signal_new and signal_new.get("signal") != "NO_CONNECTION":
                 msg_new = publisher.format_single_signal_message(publisher.selected_symbol, signal_new, publisher.selected_timeframe, publisher.selected_duration)
@@ -396,16 +348,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML"
                 )
 
-# ---- إضافة آلية القفل لتجنب تعارض عدة عمليات ----
+# ---- آلية القفل ----
 LOCK_FILE = "/tmp/bot.lock"
 
 def main():
-    # التحقق من وجود نسخة أخرى تعمل
     if os.path.exists(LOCK_FILE):
         print("⚠️ يوجد نسخة أخرى من البوت تعمل، إنهاء هذه النسخة.")
         return
 
-    # إنشاء ملف القفل
     with open(LOCK_FILE, "w") as f:
         f.write(str(os.getpid()))
 
@@ -413,10 +363,9 @@ def main():
         app = Application.builder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start_command))
         app.add_handler(CallbackQueryHandler(button_handler))
-        print("🤖 البوت يعمل الآن... (مع بنية صيانة متقدمة وتشخيص دقيق للأخطاء)")
+        print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة)")
         app.run_polling(stop_signals=None)
     finally:
-        # حذف ملف القفل عند الخروج
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
 
