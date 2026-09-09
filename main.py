@@ -49,7 +49,7 @@ UID = int(os.environ.get("POCKET_UID", UID))
 IS_DEMO = 1
 PLATFORM = 2
 
-BOT_TOKEN = "8604552604:AAEk3TVEOBWe-05PE6Fcd5X4pZDf8_IWIwE"
+BOT_TOKEN = "8604552604:AAF_z6QkJo4GLaPqZ6MTZ56uppsEbytQJKg"
 BOT_TOKEN = os.environ.get("BOT_TOKEN", BOT_TOKEN)
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
@@ -235,6 +235,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💰 الرصيد", callback_data="balance")],
         [InlineKeyboardButton("📊 اختيار العملة", callback_data="select_symbol")],
         [InlineKeyboardButton(f"📈 إشارة فورية ({symbol})", callback_data="signal_now")],
+        # ✅ السطر الجديد المضاف (زر عرض آخر بيانات السوق)
+        [InlineKeyboardButton("📊 آخر بيانات السوق", callback_data="last_data")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
@@ -347,6 +349,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"❌ فشل توليد الإشارة.\n\nتفاصيل الخطأ:\n<code>{publisher.last_error}</code>",
                     parse_mode="HTML"
                 )
+
+    # ✅ البدء: قسم "آخر بيانات السوق" الجديد (لم يتم حذف أو تعديل أي سطر سابق)
+    elif data == "last_data":
+        # محاولة اتصال تلقائي إذا كان غير متصل
+        if not publisher.connected:
+            await publisher.async_connect()
+        
+        # جلب آخر 30 شمعة
+        candles = publisher.get_candles(publisher.selected_symbol, publisher.selected_timeframe, 30)
+        if not candles:
+            await query.edit_message_text(
+                f"❌ لا توجد بيانات لعرضها.\n"
+                f"🔹 الحالة: {'✅ متصل' if publisher.connected else '❌ غير متصل'}\n"
+                f"🔹 آخر خطأ: {publisher.last_error or 'لا يوجد'}"
+            )
+            return
+
+        # حساب المؤشرات وعرض التفاصيل
+        closes = [c[4] for c in candles]
+        current_price = closes[-1]
+        sma5 = sum(closes[-5:]) / 5
+        sma20 = sum(closes[-20:]) / 20
+        signal = generate_signal(candles)
+
+        msg = f"📊 <b>بيانات السوق الحالية</b>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"🔹 الرمز: <b>{publisher.selected_symbol}</b>\n"
+        msg += f"🔹 الفريم: {publisher.selected_timeframe} ثانية\n"
+        msg += f"🔹 حالة الاتصال: {'✅ متصل' if publisher.connected else '❌ غير متصل'}\n"
+        msg += f"🔹 عدد الشموع المجلوبة: {len(candles)}\n"
+        msg += f"🔹 السعر الحالي (الإغلاق): <b>{current_price:.5f}</b>\n"
+        msg += f"🔹 المتوسط المتحرك SMA(5): {sma5:.5f}\n"
+        msg += f"🔹 المتوسط المتحرك SMA(20): {sma20:.5f}\n"
+        msg += f"🔹 الإشارة الحالية: <b>{signal['signal']}</b> (ثقة {signal['confidence']}%)\n"
+        msg += f"🔹 سبب الإشارة: {signal['reason']}\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"📋 <b>آخر 5 شموع (الخزانة):</b>\n"
+        
+        for idx, c in enumerate(candles[-5:], 1):
+            try:
+                # c[0] = timestamp, c[1]=فتح, c[2]=أعلى, c[3]=أدنى, c[4]=إغلاق
+                dt = datetime.fromtimestamp(c[0]).strftime("%H:%M:%S")
+                msg += (
+                    f"  {idx}⟩ {dt} | فتح: {c[1]:.5f} | أعلى: {c[2]:.5f} | "
+                    f"أدنى: {c[3]:.5f} | إغلاق: <b>{c[4]:.5f}</b>\n"
+                )
+            except Exception:
+                msg += f"  {idx}⟩ {c}\n"
+        
+        await query.edit_message_text(msg, parse_mode="HTML")
+    # ✅ نهاية القسم الجديد
 
 # ---- آلية القفل ----
 LOCK_FILE = "/tmp/bot.lock"
