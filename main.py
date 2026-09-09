@@ -422,5 +422,44 @@ def main():
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
 
+# ============================================================
+# 🚀 إضافة دعم Vercel عبر Flask + Webhook (بدون تعديل أي سطر أعلاه)
+# ============================================================
+try:
+    from flask import Flask, request, jsonify
+except ImportError:
+    Flask = None
+
+if Flask is not None:
+    # إنشاء تطبيق Flask
+    flask_app = Flask(__name__)
+
+    @flask_app.route('/api', methods=['POST'])
+    def webhook():
+        try:
+            # استقبال بيانات التحديث من Telegram
+            update_data = request.get_json(force=True)
+            # بناء Application جديد (مطابق لما في main) لمعالجة التحديث
+            temp_app = Application.builder().token(BOT_TOKEN).build()
+            temp_app.add_handler(CommandHandler("start", start_command))
+            temp_app.add_handler(CallbackQueryHandler(button_handler))
+            
+            # معالجة التحديث (يجب أن تكون غير متزامنة، لكننا نستخدم asyncio.run)
+            import asyncio
+            update = Update.de_json(update_data, temp_app.bot)
+            asyncio.run(temp_app.process_update(update))
+            
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+    # تصدير متغير `app` المطلوب من Vercel (يشير إلى كائن Flask)
+    app = flask_app
+else:
+    # في حالة عدم وجود Flask، نعرف app فارغاً لتجنب خطأ Vercel (لكن سيتم استخدام main)
+    app = None
+
+# ============================================================
+
 if __name__ == "__main__":
     main()
