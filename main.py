@@ -19,6 +19,25 @@ os.environ["HOME"] = TMP_DIR
 os.environ["TMPDIR"] = TMP_DIR
 os.environ.setdefault("POCKETOPTION_HISTORY_PATH", TMP_DIR)
 
+# --- إضافة سيرفر خفيف للرد على الاستضافات لمنع إغلاق السيرفر (Health Check) ---
+from flask import Flask
+
+health_app = Flask(__name__)
+
+
+@health_app.route("/")
+def health_check():
+    return "Bot is alive and running!", 200
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    try:
+        health_app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        print(f"Health server error: {e}")
+
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -49,7 +68,7 @@ UID = int(os.environ.get("POCKET_UID", UID))
 IS_DEMO = 1
 PLATFORM = 2
 
-BOT_TOKEN = "8604552604:AAEk3TVEOBWe-05PE6Fcd5X4pZDf8_IWIwE"
+BOT_TOKEN = "8604552604:AAF_z6QkJo4GLaPqZ6MTZ56uppsEbytQJKg"
 BOT_TOKEN = os.environ.get("BOT_TOKEN", BOT_TOKEN)
 
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
@@ -409,6 +428,9 @@ def main():
         print("⚠️ يوجد نسخة أخرى من البوت تعمل، إنهاء هذه النسخة.")
         return
 
+    # تشغيل سيرفر الصحة بالخلفية لإبقاء منفذ الاستضافة نشطاً
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     with open(LOCK_FILE, "w") as f:
         f.write(str(os.getpid()))
 
@@ -421,45 +443,6 @@ def main():
     finally:
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
-
-# ============================================================
-# 🚀 إضافة دعم Vercel عبر Flask + Webhook (بدون تعديل أي سطر أعلاه)
-# ============================================================
-try:
-    from flask import Flask, request, jsonify
-except ImportError:
-    Flask = None
-
-if Flask is not None:
-    # إنشاء تطبيق Flask
-    flask_app = Flask(__name__)
-
-    @flask_app.route('/api', methods=['POST'])
-    def webhook():
-        try:
-            # استقبال بيانات التحديث من Telegram
-            update_data = request.get_json(force=True)
-            # بناء Application جديد (مطابق لما في main) لمعالجة التحديث
-            temp_app = Application.builder().token(BOT_TOKEN).build()
-            temp_app.add_handler(CommandHandler("start", start_command))
-            temp_app.add_handler(CallbackQueryHandler(button_handler))
-            
-            # معالجة التحديث (يجب أن تكون غير متزامنة، لكننا نستخدم asyncio.run)
-            import asyncio
-            update = Update.de_json(update_data, temp_app.bot)
-            asyncio.run(temp_app.process_update(update))
-            
-            return jsonify({"status": "ok"}), 200
-        except Exception as e:
-            return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
-
-    # تصدير متغير `app` المطلوب من Vercel (يشير إلى كائن Flask)
-    app = flask_app
-else:
-    # في حالة عدم وجود Flask، نعرف app فارغاً لتجنب خطأ Vercel (لكن سيتم استخدام main)
-    app = None
-
-# ============================================================
 
 if __name__ == "__main__":
     main()
