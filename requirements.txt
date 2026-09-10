@@ -2,4 +2,4 @@ python-telegram-bot==20.3
 Flask==3.0.0
 requests
 websocket-client
-git+https://github.com/tech-me-out/pocketoptionapi.git
+urllib3
