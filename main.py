@@ -4,35 +4,14 @@
 import os
 import sys
 import time
+import json
+import re
 import asyncio
 import inspect
+import urllib.parse
 import traceback
 from datetime import datetime
 from typing import Dict, List, Optional
-
-# --- ترقيع asyncio لبيئة Streamlit ---
-try:
-    _original_get_event_loop = asyncio.get_event_loop
-    def _patched_get_event_loop():
-        try:
-            return _original_get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop
-    asyncio.get_event_loop = _patched_get_event_loop
-except Exception:
-    pass
-
-try:
-    asyncio.get_event_loop()
-except Exception:
-    try:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    except Exception:
-        pass
-
-import streamlit as st
 
 # --- مسارات الكتابة ---
 TMP_DIR = "/tmp/pocket_data"
@@ -44,7 +23,9 @@ try:
 except Exception:
     pass
 
-# --- استيراد المكتبة الجديدة ---
+import streamlit as st
+
+# --- استيراد المكتبة ---
 LIB_TYPE = "none"
 try:
     from pocket_option import PocketOptionClient
@@ -73,7 +54,7 @@ USERS: Dict[str, Dict] = {
             },
             "real": {
                 "label": "🟢 حساب حقيقي",
-                "session": '42["auth",{"session":"a%3A4%3A%7Bs%3A10%3A%22session_id%22%3Bs%3A32%3A%22dd9920ddafa73b322244df17e0ba2009%22%3Bs%3A10%3A%22ip_address%22%3Bs%3A11%3A%22169.224.4.6%22%3Bs%3A10%3A%22user_agent%22%3Bs%3A108%3A%22Mozilla%2F5.0%20%28Linux%3B%20Android%2013%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F120.0.0.0%20Mobile%20Safari%2F537.36%22%3Bs%3A13%3A%22last_activity%22%3Bi%3A1789007882%3B%7Decbc04e37c4181aa586dfbc8bbd9c12d","isDemo":0,"uid":101884312,"platform":1,"isFastHistory":true,"isOptimized":true}]',
+                "session": '42["auth",{"session":"dd9920ddafa73b322244df17e0ba2009","isDemo":0,"uid":101884312,"platform":1,"isFastHistory":true,"isOptimized":true}]',
                 "uid": 101884312,
                 "is_demo": 0,
                 "platform": 1,
@@ -87,65 +68,197 @@ FOREX_SYMBOLS = ["EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "AUDUSD_otc", "USDCAD
 
 
 # ============================================================
-# دوال مساعدة
+# 🔑 استخراج جلسة WS من أي صيغة
 # ============================================================
-def generate_signal(candles, short_period=5, long_period=20) -> Dict:
-    if not candles or len(candles) < long_period + 1:
-        return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0, "reason": "بيانات غير كافية"}
+def extract_ws_session(raw_session: str) -> str:
+    """
+    يستخرج WS session_id من:
+    - 42["auth",{"session":"vtftn..."}]                ← رسالة Socket.IO
+    - a%3A4%3A%7Bs%3A10%3A%22session_id%22...          ← PHP cookie مُرمَّز
+    - hex خام 32 حرف
+    """
+    if not raw_session:
+        raise ValueError("session فارغة")
+
+    # الحالة 1: JSON داخل 42["auth",{...}]
+    m = re.search(r'"session"\s*:\s*"([^"]+)"', raw_session)
+    if m:
+        candidate = m.group(1)
+        if 8 <= len(candidate) <= 64 and "%" not in candidate and "\\" not in candidate:
+            return candidate
+
+    # الحالة 2: PHP serialized URL-encoded
     try:
-        closes = [c['close'] for c in candles]
+        decoded = urllib.parse.unquote(raw_session)
+        m2 = re.search(r's:\d+:"session_id";s:\d+:"([A-Za-z0-9]{16,64})"', decoded)
+        if m2:
+            return m2.group(1)
     except Exception:
-        return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0, "reason": "صيغة شموع غير معروفة"}
-    current_price = closes[-1]
-    sma_short = sum(closes[-short_period:]) / short_period
-    sma_long = sum(closes[-long_period:]) / long_period
-    prev_sma_short = sum(closes[-short_period-1:-1]) / short_period
-    prev_sma_long = sum(closes[-long_period-1:-1]) / long_period
-    diff = abs((sma_short - sma_long) / sma_long) * 100 if sma_long > 0 else 0
-    confidence = min(90, 50 + diff * 3)
-    if prev_sma_short <= prev_sma_long and sma_short > sma_long:
-        return {"signal": "CALL 🟢", "confidence": round(confidence, 1), "price": current_price, "reason": f"SMA({short_period}) تجاوز SMA({long_period})"}
-    elif prev_sma_short >= prev_sma_long and sma_short < sma_long:
-        return {"signal": "PUT 🔴", "confidence": round(confidence, 1), "price": current_price, "reason": f"SMA({short_period}) نزل تحت SMA({long_period})"}
-    return {"signal": "NEUTRAL ⚪", "confidence": 50.0, "price": current_price, "reason": "لا يوجد تقاطع واضح"}
+        pass
+
+    # الحالة 3: hex خام
+    m3 = re.search(r'\b([a-f0-9]{32})\b', raw_session.lower())
+    if m3:
+        return m3.group(1)
+
+    raise ValueError(f"تعذّر استخراج WS session من: {raw_session[:80]}...")
+
+
+def parse_auth_message(session_str: str) -> dict:
+    """يستخرج dict من رسالة 42["auth",{...}] إن وُجدت."""
+    m = re.search(r'42\["auth",\s*(\{.*?\})\s*\]', session_str)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return {}
 
 
 # ============================================================
-# 🔧 دالة انتظار الاتصال
+# 🔧 بناء AuthorizationData
 # ============================================================
-async def _wait_for_socket_connection(client, max_wait: float = 30.0, step: float = 0.5, progress_cb=None) -> bool:
+def build_auth_data(acc: dict) -> AuthorizationData:
+    """يبني AuthorizationData بشكل صحيح للحساب demo أو real."""
+    parsed = parse_auth_message(acc.get("session", ""))
+    ws_session = extract_ws_session(acc["session"])
+    print(f"[AUTH] ws_session = {ws_session[:10]}... (len={len(ws_session)})")
+
+    payload = {
+        "session":       ws_session,
+        "isDemo":        int(acc.get("is_demo", parsed.get("isDemo", 1))),
+        "uid":           int(acc.get("uid", parsed.get("uid", 0))),
+        "platform":      int(acc.get("platform", parsed.get("platform", 2))),
+        "isFastHistory": True,
+        "isOptimized":   True,
+    }
+    return AuthorizationData.model_validate(payload)
+
+
+# ============================================================
+# 🔌 إنشاء client + اتصال صحيح
+# ============================================================
+def make_client(auth_data: AuthorizationData):
+    """
+    يحاول إنشاء العميل بعدة توقيعات محتملة للمكتبة.
+    يُعيد (client, how) حيث how = وصف طريقة الإنشاء.
+    """
+    # محاولة 1: تمرير auth في المُنشئ
+    try:
+        c = PocketOptionClient(auth_data)
+        return c, "PocketOptionClient(auth_data)"
+    except TypeError:
+        pass
+
+    # محاولة 2: بلا وسائط ثم تعيين AuthorizationData
+    try:
+        c = PocketOptionClient()
+        for attr in ("authorization_data", "auth_data", "authorization"):
+            if hasattr(c, attr):
+                try:
+                    setattr(c, attr, auth_data)
+                    return c, f"PocketOptionClient() + set {attr}"
+                except Exception:
+                    continue
+        return c, "PocketOptionClient() (no auth set)"
+    except Exception as e:
+        raise RuntimeError(f"فشل إنشاء PocketOptionClient: {e}")
+
+
+async def _call_maybe_async(fn, *args, timeout: float = 25.0, **kwargs):
+    """يستدعي دالة قد تكون sync أو async مع timeout."""
+    ret = fn(*args, **kwargs)
+    if inspect.isawaitable(ret):
+        return await asyncio.wait_for(ret, timeout=timeout)
+    return ret
+
+
+async def explicit_connect(client, auth_data, progress_cb=None) -> dict:
+    """
+    يحاول عدة توقيعات للاتصال. لا يفرض url.
+    """
+    result = {"success": False, "used": None, "errors": []}
+
+    def _p(msg):
+        if progress_cb:
+            try: progress_cb(msg)
+            except Exception: pass
+        print(f"[CONNECT] {msg}")
+
+    # قائمة المحاولات بالترتيب — من الأكثر احتمالاً للأقل
+    attempts = []
+
+    # connect() بلا وسائط
+    attempts.append(("connect()", lambda: client.connect()))
+
+    # connect(wait=True)
+    try:
+        sig = inspect.signature(client.connect)
+        if "wait" in sig.parameters:
+            attempts.append(("connect(wait=True)", lambda: client.connect(wait=True)))
+        if "auth" in sig.parameters:
+            attempts.append(("connect(auth=auth_data)", lambda: client.connect(auth=auth_data)))
+        if "authorization" in sig.parameters:
+            attempts.append(("connect(authorization=auth_data)",
+                             lambda: client.connect(authorization=auth_data)))
+    except Exception:
+        pass
+
+    # connect(auth_data) positional
+    attempts.append(("connect(auth_data)", lambda: client.connect(auth_data)))
+
+    for name, fn in attempts:
+        try:
+            _p(f"🔌 محاولة: {name}")
+            await _call_maybe_async(fn, timeout=25.0)
+            result["used"] = name
+            result["success"] = True
+            _p(f"✅ نجح: {name}")
+            return result
+        except TypeError as te:
+            result["errors"].append(f"{name} → TypeError: {te}")
+        except asyncio.TimeoutError:
+            result["errors"].append(f"{name} → Timeout 25s")
+        except Exception as e:
+            result["errors"].append(f"{name} → {type(e).__name__}: {e}")
+
+    return result
+
+
+def _get_sio(client):
+    """يجد كائن socket.io بأي اسم سمة."""
+    for attr in ("sio", "_sio", "socket", "_socket", "ws", "_ws"):
+        obj = getattr(client, attr, None)
+        if obj is not None and hasattr(obj, "connected"):
+            return obj
+    return None
+
+
+async def wait_socket_connected(client, max_wait=20.0, step=0.5, progress_cb=None) -> bool:
     waited = 0.0
+    last_msg = 0
     while waited < max_wait:
         await asyncio.sleep(step)
         waited += step
-        try:
-            sio = (getattr(client, "sio", None)
-                   or getattr(client, "_sio", None)
-                   or getattr(client, "socket", None)
-                   or getattr(client, "_socket", None))
-            if sio is not None and getattr(sio, "connected", False):
-                print(f"[DEBUG] Socket connected after {waited:.1f}s")
-                return True
-            if getattr(client, "is_connected", False):
-                print(f"[DEBUG] client.is_connected=True after {waited:.1f}s")
-                return True
-        except Exception:
-            pass
-        if progress_cb and int(waited) % 2 == 0:
-            try:
-                progress_cb(f"⏳ انتظار الاتصال بـ Socket... ({waited:.0f}s / {max_wait:.0f}s)")
-            except Exception:
-                pass
-    print(f"[DEBUG] Socket NOT connected after {max_wait}s")
+
+        sio = _get_sio(client)
+        if sio is not None and getattr(sio, "connected", False):
+            print(f"[DEBUG] socket connected after {waited:.1f}s")
+            return True
+        if getattr(client, "is_connected", False):
+            print(f"[DEBUG] is_connected=True after {waited:.1f}s")
+            return True
+
+        if progress_cb and int(waited) - last_msg >= 2:
+            last_msg = int(waited)
+            try: progress_cb(f"⏳ انتظار Socket... ({waited:.0f}s / {max_wait:.0f}s)")
+            except Exception: pass
+
     return False
 
 
-# ============================================================
-# 🆕 دوال تشخيص واتصال صريح
-# ============================================================
-def _diagnose_client(client) -> str:
-    lines = []
-    lines.append("=== تشخيص كائن PocketOptionClient ===")
+def diagnose_client(client) -> str:
+    lines = ["=== تشخيص كائن PocketOptionClient ==="]
     lines.append(f"النوع: {type(client).__name__}")
     lines.append(f"الوحدة: {type(client).__module__}")
     try:
@@ -156,236 +269,205 @@ def _diagnose_client(client) -> str:
         try:
             val = getattr(client, a)
             kind = type(val).__name__
-            if callable(val):
-                lines.append(f"  • {a}()  [{kind}]")
-            else:
-                lines.append(f"  • {a} = {kind}")
+            lines.append(f"  • {a}{'()' if callable(val) else ''}  [{kind}]")
         except Exception as e:
             lines.append(f"  • {a} = <خطأ: {e}>")
     return "\n".join(lines)
 
 
-# 🆕 عناوين WebSocket الرسمية لـ PocketOption
-POCKETOPTION_WS_URLS = [
-    "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
-    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
-    "wss://api-asia.po.market/socket.io/?EIO=4&transport=websocket",
-    "wss://api-us.po.market/socket.io/?EIO=4&transport=websocket",
-]
-
-
-async def _explicit_connect(client, auth_data, progress_cb=None) -> dict:
-    result = {"success": False, "used": None, "errors": []}
-
-    try:
-        client.authorization_data = auth_data
-        print(f"[DEBUG] تم تعيين client.authorization_data مباشرة.")
-    except Exception as e:
-        result["errors"].append(f"set authorization_data: {e}")
-
-    for url in POCKETOPTION_WS_URLS:
-        try:
-            if progress_cb:
-                progress_cb(f"🔌 محاولة الاتصال بـ: {url.split('//')[1].split('/')[0]}...")
-            print(f"[DEBUG] محاولة الاتصال بـ: {url}")
-            ret = client.connect(
-                url=url,
-                auth=auth_data,
-                wait=True,
-                wait_timeout=20,
-                retry=True,
-            )
-            if inspect.isawaitable(ret):
-                await ret
-            result["used"] = f"connect({url})"
-            result["success"] = True
-            print(f"[DEBUG] _explicit_connect نجحت باستخدام: connect({url})")
-            return result
-        except TypeError as te:
-            result["errors"].append(f"connect({url}) TypeError: {te}")
-            print(f"[DEBUG] TypeError على {url}: {te}")
-        except Exception as e:
-            result["errors"].append(f"connect({url}): {e}")
-            print(f"[DEBUG] فشل الاتصال بـ {url}: {e}")
-
-    return result
-
-
+# ============================================================
+# 💰 سحب الرصيد
+# ============================================================
 async def _get_balance_async(acc: dict, progress_cb=None) -> float:
-    """
-    الحصول على الرصيد - مع دعم تتبع حي للعملية.
-    """
     def _p(msg):
         if progress_cb:
-            try:
-                progress_cb(msg)
-            except Exception:
-                pass
+            try: progress_cb(msg)
+            except Exception: pass
         print(f"[PROGRESS] {msg}")
 
-    _p("🔄 المرحلة 1/4: تهيئة العميل...")
-    client = PocketOptionClient()
+    _p("🔄 المرحلة 1/4: تجهيز بيانات التفويض...")
+    auth_data = build_auth_data(acc)
 
-    session_id = acc["session"].split('"session":"')[1].split('"')[0]
+    _p("🔄 المرحلة 2/4: إنشاء العميل...")
+    client, how = make_client(auth_data)
+    print(f"[DEBUG] client created via: {how}")
 
-    auth_data = AuthorizationData.model_validate({
-        "session": session_id,
-        "isDemo": acc["is_demo"],
-        "uid": acc["uid"],
-        "platform": acc["platform"],
-        "isFastHistory": True,
-        "isOptimized": True,
-    })
-
-    balance_value = None
+    # تسجيل مستقبل الرصيد
+    balance_value = {"v": None}
 
     @client.on.balance_success_update
-    async def on_balance_update(data):
-        nonlocal balance_value
-        print(f"[DEBUG] Balance update received: {data}")
+    async def on_balance(data):
+        print(f"[DEBUG] balance update: {data}")
         if isinstance(data, dict):
-            balance_value = data.get('balance', data.get('amount', data.get('value', 0)))
-        elif hasattr(data, 'balance'):
-            balance_value = data.balance
+            balance_value["v"] = data.get("balance", data.get("amount", data.get("value", 0)))
+        elif hasattr(data, "balance"):
+            balance_value["v"] = data.balance
         else:
-            balance_value = data
+            balance_value["v"] = data
 
-    default_init(
-        client,
-        authorization=auth_data,
-        sub_assets=["EURUSD_otc"],
-        sub_period=60,
-    )
+    # default_init قد لا يكون ضرورياً وربما يسبب مشاكل — نلفّه بـ try
+    try:
+        default_init(client, authorization=auth_data,
+                     sub_assets=["EURUSD_otc"], sub_period=60)
+    except Exception as e:
+        print(f"[DEBUG] default_init تخطّاه: {e}")
 
-    _p("🔄 المرحلة 2/4: الاتصال بـ WebSocket...")
-    conn_result = await _explicit_connect(client, auth_data, progress_cb=_p)
-    print(f"[DEBUG] _explicit_connect result: {conn_result}")
+    _p("🔄 المرحلة 3/4: الاتصال بـ WebSocket...")
+    conn = await explicit_connect(client, auth_data, progress_cb=_p)
+    print(f"[DEBUG] connect result: {conn}")
 
-    if not conn_result.get("success"):
-        # فشل الاتصال بكل العناوين
-        diagnosis = _diagnose_client(client)
+    if not conn["success"]:
+        diagnosis = diagnose_client(client)
         raise TimeoutError(
-            f"❌ فشل الاتصال بجميع عناوين WebSocket.\n"
-            f"الأخطاء: {conn_result.get('errors')}\n\n"
-            f"⚠️ ملاحظة: Streamlit Cloud قد يحجب اتصالات WebSocket الصادرة.\n\n"
-            f"{diagnosis}"
+            f"❌ فشل الاتصال بكل التوقيعات.\n"
+            f"الأخطاء: {conn['errors']}\n\n{diagnosis}"
         )
 
-    _p("🔄 المرحلة 3/4: انتظار التفويض...")
-    connected = await _wait_for_socket_connection(client, max_wait=15.0, step=0.5, progress_cb=_p)
+    connected = await wait_socket_connected(client, max_wait=15.0, progress_cb=_p)
+    _p(f"✅ Socket: {'متصل' if connected else 'غير متصل'}")
 
     authorized = False
-    if connected:
-        try:
-            if hasattr(client, "wait_for_authorization"):
-                ret = client.wait_for_authorization()
-                if inspect.isawaitable(ret):
-                    authorized = await asyncio.wait_for(ret, timeout=10)
-                else:
-                    authorized = ret
-                print(f"[DEBUG] wait_for_authorization -> {authorized}")
-            if getattr(client, "is_authorized", False):
-                authorized = True
-        except Exception as e_auth:
-            print(f"[DEBUG] wait_for_authorization فشل: {e_auth}")
+    try:
+        if hasattr(client, "wait_for_authorization"):
+            authorized = await _call_maybe_async(client.wait_for_authorization, timeout=10.0)
+        if getattr(client, "is_authorized", False):
+            authorized = True
+    except Exception as e:
+        print(f"[DEBUG] wait_for_authorization فشل: {e}")
 
-    # قراءة احتياطية
-    if balance_value is None:
-        try:
-            for attr in ("balance", "_balance", "account_balance", "current_balance"):
-                val = getattr(client, attr, None)
-                if val is not None and isinstance(val, (int, float)) and val >= 0:
-                    balance_value = val
-                    print(f"[DEBUG] Fallback balance from client.{attr} = {val}")
-                    break
-        except Exception:
-            pass
+    # Fallback: اقرأ الرصيد من سمات العميل
+    if balance_value["v"] is None:
+        for attr in ("balance", "_balance", "account_balance", "current_balance"):
+            v = getattr(client, attr, None)
+            if isinstance(v, (int, float)) and v >= 0:
+                balance_value["v"] = v
+                print(f"[DEBUG] fallback balance from client.{attr} = {v}")
+                break
 
     _p("🔄 المرحلة 4/4: طلب الرصيد...")
-    last_emit_error = None
-    if balance_value is None and connected:
+    if balance_value["v"] is None:
         for attempt in range(1, 4):
             try:
-                await client.emit.update_balance()
-                print(f"[DEBUG] update_balance emitted attempt {attempt}")
-                last_emit_error = None
-                break
-            except Exception as e_emit:
-                last_emit_error = e_emit
-                print(f"[DEBUG] update_balance attempt {attempt} failed: {e_emit}")
+                em = getattr(client, "emit", None)
+                if em and hasattr(em, "update_balance"):
+                    await _call_maybe_async(em.update_balance, timeout=5.0)
+                    print(f"[DEBUG] update_balance attempt {attempt} OK")
+                    break
+                elif hasattr(client, "update_balance"):
+                    await _call_maybe_async(client.update_balance, timeout=5.0)
+                    break
+            except Exception as e:
+                print(f"[DEBUG] update_balance {attempt} فشل: {e}")
                 await asyncio.sleep(1.5)
 
-    # انتظار استلام الرصيد (5 ثوانٍ فقط)
-    elapsed = 0
-    while balance_value is None and elapsed < 5:
+    elapsed = 0.0
+    while balance_value["v"] is None and elapsed < 6.0:
         await asyncio.sleep(0.5)
         elapsed += 0.5
 
     try:
-        await client.close()
+        await _call_maybe_async(client.close, timeout=5.0)
     except Exception:
         pass
 
-    if balance_value is None:
-        diagnosis = _diagnose_client(client)
-        extra = f" | آخر خطأ إرسال: {last_emit_error}" if last_emit_error else ""
-        extra += f" | متصل: {connected}"
-        extra += f" | مُفوَّض: {authorized}"
+    if balance_value["v"] is None:
         raise TimeoutError(
-            f"لم يتم استلام الرصيد.{extra}\n\n{diagnosis}"
+            f"لم يتم استلام الرصيد. متصل={connected}, مفوَّض={authorized}\n\n"
+            f"{diagnose_client(client)}"
         )
 
-    return float(balance_value)
+    return float(balance_value["v"])
 
 
+# ============================================================
+# 📊 سحب الشموع
+# ============================================================
 async def _get_candles_async(acc: dict, asset: str, period: int, progress_cb=None) -> List:
     def _p(msg):
         if progress_cb:
-            try:
-                progress_cb(msg)
-            except Exception:
-                pass
+            try: progress_cb(msg)
+            except Exception: pass
         print(f"[PROGRESS] {msg}")
 
-    _p("🔄 تهيئة العميل للشموع...")
-    client = PocketOptionClient()
-    session_id = acc["session"].split('"session":"')[1].split('"')[0]
+    _p("🔄 تجهيز التفويض...")
+    auth_data = build_auth_data(acc)
 
-    auth_data = AuthorizationData.model_validate({
-        "session": session_id,
-        "isDemo": acc["is_demo"],
-        "uid": acc["uid"],
-        "platform": acc["platform"],
-        "isFastHistory": True,
-        "isOptimized": True,
-    })
+    _p("🔄 إنشاء العميل...")
+    client, how = make_client(auth_data)
+    print(f"[DEBUG] client via: {how}")
 
-    default_init(
-        client,
-        authorization=auth_data,
-        sub_assets=[asset],
-        sub_period=period,
-    )
+    try:
+        default_init(client, authorization=auth_data,
+                     sub_assets=[asset], sub_period=period)
+    except Exception as e:
+        print(f"[DEBUG] default_init تخطّاه: {e}")
 
-    _p("🔌 الاتصال للشموع...")
-    await _explicit_connect(client, auth_data, progress_cb=_p)
-    await _wait_for_socket_connection(client, max_wait=15.0, step=0.5, progress_cb=_p)
+    _p("🔌 الاتصال...")
+    conn = await explicit_connect(client, auth_data, progress_cb=_p)
+    if not conn["success"]:
+        raise TimeoutError(f"فشل الاتصال: {conn['errors']}")
+
+    await wait_socket_connected(client, max_wait=15.0, progress_cb=_p)
 
     try:
         if hasattr(client, "wait_for_authorization"):
-            ret = client.wait_for_authorization()
-            if inspect.isawaitable(ret):
-                await asyncio.wait_for(ret, timeout=10)
+            await _call_maybe_async(client.wait_for_authorization, timeout=10.0)
     except Exception:
         pass
 
     _p("📊 جلب الشموع...")
-    candles = await client.get_candles(Asset(asset), period, 30)
+    candles = await _call_maybe_async(
+        client.get_candles, Asset(asset), period, 30, timeout=30.0
+    )
     try:
-        await client.close()
+        await _call_maybe_async(client.close, timeout=5.0)
     except Exception:
         pass
-    return candles
+
+    return candles or []
+
+
+# ============================================================
+# 📈 توليد الإشارة
+# ============================================================
+def generate_signal(candles, short_period=5, long_period=20) -> Dict:
+    if not candles or len(candles) < long_period + 1:
+        return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0,
+                "reason": "بيانات غير كافية"}
+
+    def _close(c):
+        if isinstance(c, dict):
+            return c.get("close")
+        return getattr(c, "close", None)
+
+    try:
+        closes = [_close(c) for c in candles]
+        closes = [c for c in closes if isinstance(c, (int, float))]
+    except Exception:
+        return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0,
+                "reason": "صيغة شموع غير معروفة"}
+
+    if len(closes) < long_period + 1:
+        return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0,
+                "reason": "بيانات غير كافية"}
+
+    price = closes[-1]
+    sma_s = sum(closes[-short_period:]) / short_period
+    sma_l = sum(closes[-long_period:]) / long_period
+    prev_s = sum(closes[-short_period-1:-1]) / short_period
+    prev_l = sum(closes[-long_period-1:-1]) / long_period
+
+    diff = abs((sma_s - sma_l) / sma_l) * 100 if sma_l else 0
+    conf = min(90, 50 + diff * 3)
+
+    if prev_s <= prev_l and sma_s > sma_l:
+        return {"signal": "CALL 🟢", "confidence": round(conf, 1),
+                "price": price, "reason": f"SMA({short_period}) تجاوز SMA({long_period})"}
+    if prev_s >= prev_l and sma_s < sma_l:
+        return {"signal": "PUT 🔴", "confidence": round(conf, 1),
+                "price": price, "reason": f"SMA({short_period}) نزل تحت SMA({long_period})"}
+    return {"signal": "NEUTRAL ⚪", "confidence": 50.0, "price": price,
+            "reason": "لا يوجد تقاطع واضح"}
 
 
 def verify_login(email, password):
@@ -397,7 +479,7 @@ def verify_login(email, password):
 
 
 # ============================================================
-# واجهة Streamlit
+# 🎨 واجهة Streamlit
 # ============================================================
 st.set_page_config(page_title="إشارات OTC", page_icon="📈", layout="wide")
 
@@ -442,7 +524,6 @@ st.markdown("""
     color: #94a3b8;
     font-size: 1rem;
     margin-bottom: 1.5rem;
-    letter-spacing: 0.5px;
 }
 @keyframes welcomeFade {
     0% { opacity: 0; transform: translateY(-15px); }
@@ -461,55 +542,13 @@ st.markdown("""
     position: relative;
     overflow: hidden;
 }
-.welcome-box::before {
-    content: "";
-    position: absolute;
-    top: -50%; left: -50%;
-    width: 200%; height: 200%;
-    background: conic-gradient(from 0deg, transparent, rgba(34,211,238,0.12), transparent 30%);
-    animation: rotateGlow 8s linear infinite;
-    pointer-events: none;
-}
-@keyframes rotateGlow {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-.welcome-box h2 {
-    margin: 0 0 0.5rem 0;
-    font-size: 1.6rem;
-    color: #22d3ee;
-    position: relative;
-    z-index: 1;
-}
-.welcome-box p {
-    margin: 0.3rem 0;
-    font-size: 1.02rem;
-    color: #cbd5e1;
-    position: relative;
-    z-index: 1;
-    line-height: 1.7;
-}
-.welcome-box .highlight {
-    color: #fbbf24;
-    font-weight: 700;
-}
-.info-card {
-    background: rgba(30,41,59,0.75);
-    border: 1px solid rgba(148,163,184,0.15);
-    border-radius: 14px;
-    padding: 1rem 1.2rem;
-    margin: 0.5rem 0;
-    backdrop-filter: blur(8px);
-    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
-    color: #e2e8f0;
-}
+.welcome-box h2 { margin: 0 0 0.5rem 0; font-size: 1.6rem; color: #22d3ee; position: relative; z-index: 1; }
+.welcome-box p { margin: 0.3rem 0; font-size: 1.02rem; color: #cbd5e1; position: relative; z-index: 1; line-height: 1.7; }
+.welcome-box .highlight { color: #fbbf24; font-weight: 700; }
 .stButton > button {
     background: linear-gradient(135deg, #1e3a8a, #3b82f6) !important;
-    color: #fff !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    padding: 0.6rem 1rem !important;
+    color: #fff !important; border: none !important; border-radius: 10px !important;
+    font-weight: 600 !important; padding: 0.6rem 1rem !important;
     transition: all 0.25s ease !important;
     box-shadow: 0 4px 12px rgba(59,130,246,0.35) !important;
 }
@@ -522,41 +561,35 @@ st.markdown("""
     background: linear-gradient(135deg, #0891b2, #22d3ee) !important;
     box-shadow: 0 4px 14px rgba(34,211,238,0.45) !important;
 }
-.stButton > button[kind="primary"]:hover {
-    background: linear-gradient(135deg, #22d3ee, #67e8f9) !important;
-    box-shadow: 0 8px 26px rgba(34,211,238,0.7) !important;
-}
 .signal-call{background:linear-gradient(90deg,#00c853,#64dd17);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800;box-shadow:0 6px 24px rgba(0,200,83,0.45)}
 .signal-put{background:linear-gradient(90deg,#d50000,#ff1744);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800;box-shadow:0 6px 24px rgba(213,0,0,0.45)}
 .signal-neutral{background:linear-gradient(90deg,#616161,#9e9e9e);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800}
+.reminder-box{background:linear-gradient(90deg,#f59e0b,#fbbf24);padding:1.2rem;border-radius:12px;color:#1f2937;text-align:center;font-size:1.15rem;font-weight:bold;margin-top:1rem;animation:pulseGlow 1.5s infinite}
 @keyframes pulseGlow {
     0% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
     50% { transform: scale(1.02); box-shadow: 0 6px 25px rgba(245,158,11,0.8); }
     100% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
 }
-.reminder-box{animation:pulseGlow 1.5s infinite;background:linear-gradient(90deg,#f59e0b,#fbbf24);padding:1.2rem;border-radius:12px;color:#1f2937;text-align:center;font-size:1.15rem;font-weight:bold;margin-top:1rem}
 .progress-box{background:rgba(30,41,59,0.95);border:1px solid rgba(34,211,238,0.4);border-radius:12px;padding:1rem;color:#22d3ee;font-family:monospace;font-size:0.95rem;margin:0.5rem 0;box-shadow:0 4px 15px rgba(34,211,238,0.2)}
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(30,41,59,0.98)) !important;
     border-right: 1px solid rgba(34,211,238,0.15);
 }
-section[data-testid="stSidebar"] * {
-    color: #e2e8f0 !important;
-}
-.stProgress > div > div > div > div {
-    background: linear-gradient(90deg, #22d3ee, #3b82f6);
-}
+section[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
 hr { border-color: rgba(34,211,238,0.15) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-if "logged_in" not in st.session_state: st.session_state.logged_in = False
-if "user" not in st.session_state: st.session_state.user = None
-if "selected_account" not in st.session_state: st.session_state.selected_account = None
-if "last_signal" not in st.session_state: st.session_state.last_signal = None
-if "last_candles" not in st.session_state: st.session_state.last_candles = None
+# حالة الجلسة
+for k, v in [("logged_in", False), ("user", None), ("selected_account", None),
+             ("last_signal", None), ("last_candles", None), ("connection_ready", False)]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
+# ============================================================
+# 🔐 شاشة الدخول
+# ============================================================
 if not st.session_state.logged_in:
     st.markdown('<div class="main-title">📈 إشارات OTC الاحترافية</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">منصة التداول الذكية — إصدار 2099</div>', unsafe_allow_html=True)
@@ -564,10 +597,9 @@ if not st.session_state.logged_in:
     st.markdown("""
     <div class="welcome-box">
         <h2>👋 أهلاً بك في منصة إشارات OTC</h2>
-        <p>منصة تحليلية متقدمة تعتمد على <span class="highlight">تقاطع المتوسطات المتحركة (SMA)</span> لتوليد إشارات دقيقة على أزواج العملات.</p>
+        <p>منصة تحليلية متقدمة تعتمد على <span class="highlight">تقاطع المتوسطات المتحركة (SMA)</span>.</p>
         <p>🔹 اتصال مباشر بخوادم <span class="highlight">PocketOption</span> عبر Socket.IO.</p>
         <p>🔹 دعم الحسابات <span class="highlight">التجريبية والحقيقية</span>.</p>
-        <p>🔹 تحليل فوري، شموع حية، وإشارات لحظية.</p>
         <p style="margin-top:1rem;color:#94a3b8;font-size:0.92rem">🔐 يرجى تسجيل الدخول للمتابعة.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -589,15 +621,16 @@ if not st.session_state.logged_in:
 
 
 user = st.session_state.user
-if "last_signal" not in st.session_state: st.session_state.last_signal = None
-if "last_candles" not in st.session_state: st.session_state.last_candles = None
 
+# ============================================================
+# 🎛️ الشريط الجانبي
+# ============================================================
 with st.sidebar:
     st.markdown(f"### 👤 {user['email']}")
     keys = list(user["accounts"].keys())
     labels = [user["accounts"][k]["label"] for k in keys]
-    sel = st.radio("🎯 اختر الحساب:", labels,
-                   index=keys.index(st.session_state.selected_account) if st.session_state.selected_account in keys else 0)
+    idx = keys.index(st.session_state.selected_account) if st.session_state.selected_account in keys else 0
+    sel = st.radio("🎯 اختر الحساب:", labels, index=idx)
     new_key = keys[labels.index(sel)]
     if new_key != st.session_state.selected_account:
         st.session_state.selected_account = new_key
@@ -630,151 +663,110 @@ st.markdown(f"""
     <h2>🌟 مرحباً بك، أيها المتداول</h2>
     <p>الحساب النشط: <span class="highlight">{acc['label']}</span> — UID: <span class="highlight">{acc['uid']}</span></p>
     <p>🕒 آخر دخول: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-    <p>🚀 اضغط على <span class="highlight">«بدء الاتصال»</span> لتهيئة الجلسة، ثم على <span class="highlight">«عرض الرصيد»</span> لإكمال الاتصال.</p>
+    <p>🚀 اضغط على <span class="highlight">«بدء الاتصال»</span> لتهيئة الجلسة، ثم على <span class="highlight">«عرض الرصيد»</span>.</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.info(f"الحساب النشط: **{acc['label']}** — UID: `{acc['uid']}`")
 st.markdown("---")
 
-# ============================================================
-# ✅ بوابة الاتصال + العد التنازلي + التذكير
-# ============================================================
-if "connection_ready" not in st.session_state: st.session_state.connection_ready = False
 
+# ============================================================
+# 🔌 بوابة الاتصال
+# ============================================================
 st.markdown("### 🔌 بوابة الاتصال بالمنصة")
-
 col_conn1, col_conn2 = st.columns([1, 2])
 
 with col_conn1:
-    if st.button("🚀 بدء الاتصال (عد تنازلي 15 ثانية)", type="primary", key="connect_countdown_btn"):
+    if st.button("🚀 بدء الاتصال (عد تنازلي 15 ثانية)", type="primary", key="connect_btn"):
         st.session_state.connection_ready = False
-
-        countdown_placeholder = st.empty()
-        total_seconds = 15
-
-        for i in range(total_seconds, 0, -1):
-            progress = (total_seconds - i) / total_seconds * 100
-            countdown_placeholder.markdown(
-                f"""
-                <div style="background:linear-gradient(90deg,#1e3a8a,#3b82f6);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.3rem;font-weight:bold;box-shadow:0 4px 15px rgba(59,130,246,0.4)">
-                    ⏳ جاري تجهيز الاتصال... <span style="font-size:2rem;color:#fbbf24">{i}</span> ثانية
-                    <div style="background:#0f172a;border-radius:8px;height:12px;margin-top:0.8rem;overflow:hidden">
-                        <div style="width:{progress:.1f}%;height:100%;background:linear-gradient(90deg,#22d3ee,#3b82f6);transition:width 0.3s"></div>
-                    </div>
+        ph = st.empty()
+        total = 15
+        for i in range(total, 0, -1):
+            prog = (total - i) / total * 100
+            ph.markdown(f"""
+            <div style="background:linear-gradient(90deg,#1e3a8a,#3b82f6);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.3rem;font-weight:bold">
+                ⏳ جاري تجهيز الاتصال... <span style="font-size:2rem;color:#fbbf24">{i}</span> ثانية
+                <div style="background:#0f172a;border-radius:8px;height:12px;margin-top:0.8rem;overflow:hidden">
+                    <div style="width:{prog:.1f}%;height:100%;background:linear-gradient(90deg,#22d3ee,#3b82f6);transition:width 0.3s"></div>
                 </div>
-                """,
-                unsafe_allow_html=True
-            )
-            time.sleep(1)
-
-        countdown_placeholder.markdown(
-            """
-            <div style="background:linear-gradient(90deg,#00c853,#64dd17);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold;box-shadow:0 4px 15px rgba(0,200,83,0.4)">
-                ✅ اكتمل العد التنازلي! الاتصال جاهز.
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        time.sleep(1.2)
+            """, unsafe_allow_html=True)
+            time.sleep(1)
+        ph.markdown("""
+        <div style="background:linear-gradient(90deg,#00c853,#64dd17);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold">
+            ✅ اكتمل العد التنازلي! الاتصال جاهز.
+        </div>
+        """, unsafe_allow_html=True)
+        time.sleep(1.0)
         st.session_state.connection_ready = True
         st.rerun()
 
 with col_conn2:
     if st.session_state.connection_ready:
-        st.markdown(
-            """
-            <div class="reminder-box">
-                🎯 <b>تذكير هام:</b><br>
-                الآن اضغط على زر <b>«💰 عرض الرصيد»</b> بالأسفل لإكمال الاتصال فعلياً وسحب الرصيد من المنصة.
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        st.markdown("""
+        <div class="reminder-box">
+            🎯 <b>تذكير هام:</b><br>
+            الآن اضغط على زر <b>«💰 عرض الرصيد»</b> لإكمال الاتصال.
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.info("💡 اضغط على زر **«بدء الاتصال»** لبدء العد التنازلي. بعد انتهائه ستظهر لك رسالة تذكير لسحب الرصيد.")
+        st.info("💡 اضغط **«بدء الاتصال»** أولاً.")
 
 st.markdown("---")
 
-
 c1, c2, c3 = st.columns(3)
 
+
 # ============================================================
-# 🆕 قسم الرصيد مع شريط تقدم حي
+# 💰 زر الرصيد
 # ============================================================
 with c1:
     if st.button("💰 عرض الرصيد", type="primary"):
-        # 🆕 مكان مخصص لعرض المراحل الحية
-        progress_placeholder = st.empty()
+        ph = st.empty()
 
-        def _on_progress(msg):
-            """دالة تُستدعى من داخل العملية لتحديث الشاشة فورياً."""
+        def _p(msg):
             try:
-                progress_placeholder.markdown(
-                    f'<div class="progress-box">🟢 {msg}</div>',
-                    unsafe_allow_html=True
-                )
+                ph.markdown(f'<div class="progress-box">🟢 {msg}</div>', unsafe_allow_html=True)
             except Exception:
                 pass
 
         try:
-            with st.spinner("جاري سحب الرصيد (قد يستغرق حتى 60 ثانية)..."):
-                # 🆕 حد زمني صارم: 90 ثانية كحد أقصى
-                bal = asyncio.run(
-                    asyncio.wait_for(
-                        _get_balance_async(acc, progress_cb=_on_progress),
-                        timeout=90
-                    )
-                )
-                progress_placeholder.markdown(
-                    f'<div class="progress-box" style="border-color:#22c55e;color:#22c55e">✅ اكتمل بنجاح! الرصيد: {bal}</div>',
-                    unsafe_allow_html=True
-                )
+            with st.spinner("جاري سحب الرصيد..."):
+                bal = asyncio.run(asyncio.wait_for(
+                    _get_balance_async(acc, progress_cb=_p), timeout=90))
+                ph.markdown(f'<div class="progress-box" style="border-color:#22c55e;color:#22c55e">✅ الرصيد: {bal}</div>',
+                            unsafe_allow_html=True)
                 st.success(f"💰 الرصيد: **{bal}**")
                 st.session_state.connection_ready = False
         except asyncio.TimeoutError:
-            progress_placeholder.markdown(
-                '<div class="progress-box" style="border-color:#ef4444;color:#ef4444">❌ تجاوز الحد الزمني (90 ثانية)</div>',
-                unsafe_allow_html=True
-            )
-            st.error("⏱️ **تجاوز الحد الزمني (90 ثانية).**\n\nالسبب المحتمل: Streamlit Cloud قد يحجب اتصالات WebSocket الصادرة. جرّب:")
-            st.markdown("""
-            - 🔹 استخدم **VPS** أو **خادم محلي** بدلاً من Streamlit Cloud.
-            - 🔹 تحقق من صلاحية الجلسة (Session) — انسخ جلسة جديدة من PocketOption عبر F12 → Network → WebSocket.
-            - 🔹 راجع السجلات (Logs) في Streamlit Cloud لمعرفة آخر رسالة `[PROGRESS]`.
-            """)
+            ph.markdown('<div class="progress-box" style="border-color:#ef4444;color:#ef4444">❌ تجاوز 90 ثانية</div>',
+                        unsafe_allow_html=True)
+            st.error("⏱️ تجاوز الحد الزمني. راجع السجلات للتفاصيل.")
         except Exception as e:
-            progress_placeholder.markdown(
-                f'<div class="progress-box" style="border-color:#ef4444;color:#ef4444">❌ فشل: {str(e)[:150]}...</div>',
-                unsafe_allow_html=True
-            )
+            ph.markdown(f'<div class="progress-box" style="border-color:#ef4444;color:#ef4444">❌ فشل</div>',
+                        unsafe_allow_html=True)
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
 
+
 # ============================================================
-# 🆕 قسم الإشارة الفورية مع شريط تقدم حي
+# 📈 زر الإشارة
 # ============================================================
 with c2:
     if st.button("📈 إشارة فورية"):
-        progress_placeholder2 = st.empty()
+        ph = st.empty()
 
-        def _on_progress2(msg):
+        def _p(msg):
             try:
-                progress_placeholder2.markdown(
-                    f'<div class="progress-box">🟢 {msg}</div>',
-                    unsafe_allow_html=True
-                )
+                ph.markdown(f'<div class="progress-box">🟢 {msg}</div>', unsafe_allow_html=True)
             except Exception:
                 pass
 
         try:
             with st.spinner("جاري التحليل..."):
-                candles = asyncio.run(
-                    asyncio.wait_for(
-                        _get_candles_async(acc, symbol, int(period), progress_cb=_on_progress2),
-                        timeout=90
-                    )
-                )
+                candles = asyncio.run(asyncio.wait_for(
+                    _get_candles_async(acc, symbol, int(period), progress_cb=_p), timeout=90))
                 if candles:
                     st.session_state.last_candles = candles
                     st.session_state.last_signal = generate_signal(candles)
@@ -782,32 +774,29 @@ with c2:
                 else:
                     st.error("❌ لا توجد بيانات.")
         except asyncio.TimeoutError:
-            st.error("⏱️ تجاوز الحد الزمني (90 ثانية). Streamlit Cloud قد يحجب WebSocket.")
+            st.error("⏱️ تجاوز 90 ثانية.")
         except Exception as e:
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
 
+
+# ============================================================
+# 📊 زر آخر بيانات السوق
+# ============================================================
 with c3:
     if st.button("📊 آخر بيانات السوق"):
-        progress_placeholder3 = st.empty()
+        ph = st.empty()
 
-        def _on_progress3(msg):
+        def _p(msg):
             try:
-                progress_placeholder3.markdown(
-                    f'<div class="progress-box">🟢 {msg}</div>',
-                    unsafe_allow_html=True
-                )
+                ph.markdown(f'<div class="progress-box">🟢 {msg}</div>', unsafe_allow_html=True)
             except Exception:
                 pass
 
         try:
             with st.spinner("جاري الجلب..."):
-                candles = asyncio.run(
-                    asyncio.wait_for(
-                        _get_candles_async(acc, symbol, int(period), progress_cb=_on_progress3),
-                        timeout=90
-                    )
-                )
+                candles = asyncio.run(asyncio.wait_for(
+                    _get_candles_async(acc, symbol, int(period), progress_cb=_p), timeout=90))
                 if candles:
                     st.session_state.last_candles = candles
                     st.session_state.last_signal = generate_signal(candles)
@@ -815,41 +804,65 @@ with c3:
                 else:
                     st.error("❌ لا توجد بيانات.")
         except asyncio.TimeoutError:
-            st.error("⏱️ تجاوز الحد الزمني (90 ثانية).")
+            st.error("⏱️ تجاوز 90 ثانية.")
         except Exception as e:
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
 
+
 st.markdown("---")
 
+# ============================================================
+# 📢 عرض الإشارة
+# ============================================================
 if st.session_state.last_signal:
     s = st.session_state.last_signal
     st.subheader("📢 الإشارة الحالية")
-    cls = "signal-call" if "CALL" in s["signal"] else ("signal-put" if "PUT" in s["signal"] else "signal-neutral")
-    st.markdown(f'<div class="{cls}">{s["signal"]} — ثقة {s["confidence"]}%</div>', unsafe_allow_html=True)
+    cls = "signal-call" if "CALL" in s["signal"] else \
+          ("signal-put" if "PUT" in s["signal"] else "signal-neutral")
+    st.markdown(f'<div class="{cls}">{s["signal"]} — ثقة {s["confidence"]}%</div>',
+                unsafe_allow_html=True)
     st.markdown(f"**💵 السعر:** `{s['price']:.5f}`")
     st.markdown(f"**📝 السبب:** {s['reason']}")
 
+
+# ============================================================
+# 📋 عرض الشموع
+# ============================================================
 if st.session_state.last_candles:
     cl = st.session_state.last_candles
     st.markdown("---")
     st.subheader(f"📋 آخر شموع — {symbol}")
+
+    def _c(c, key):
+        return c.get(key) if isinstance(c, dict) else getattr(c, key, None)
+
     try:
-        closes = [c['close'] for c in cl]
+        closes = [_c(c, "close") for c in cl]
+        closes = [x for x in closes if isinstance(x, (int, float))]
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("السعر", f"{closes[-1]:.5f}")
         m2.metric("SMA(5)", f"{sum(closes[-5:])/5:.5f}")
-        m3.metric("SMA(20)", f"{sum(closes[-20:])/20 if len(closes)>=20 else sum(closes)/len(closes):.5f}")
+        m3.metric("SMA(20)",
+                  f"{sum(closes[-20:])/20:.5f}" if len(closes) >= 20 else f"{sum(closes)/len(closes):.5f}")
         m4.metric("عدد الشموع", len(cl))
+
         rows = []
         for c in cl[-10:]:
+            t = _c(c, "time")
             try:
-                dt = datetime.fromtimestamp(c['time']).strftime("%H:%M:%S")
-                rows.append({"الوقت": dt, "فتح": f"{c['open']:.5f}", "أعلى": f"{c['high']:.5f}",
-                             "أدنى": f"{c['low']:.5f}", "إغلاق": f"{c['close']:.5f}"})
+                dt = datetime.fromtimestamp(t).strftime("%H:%M:%S") if t else ""
             except Exception:
-                rows.append({"الوقت": str(c), "فتح": "", "أعلى": "", "أدنى": "", "إغلاق": ""})
+                dt = str(t)
+            rows.append({
+                "الوقت": dt,
+                "فتح":  f"{_c(c,'open'):.5f}"  if isinstance(_c(c,'open'), (int,float)) else "",
+                "أعلى": f"{_c(c,'high'):.5f}"  if isinstance(_c(c,'high'), (int,float)) else "",
+                "أدنى": f"{_c(c,'low'):.5f}"   if isinstance(_c(c,'low'),  (int,float)) else "",
+                "إغلاق": f"{_c(c,'close'):.5f}" if isinstance(_c(c,'close'),(int,float)) else "",
+            })
         st.dataframe(rows, use_container_width=True)
+
         try:
             import pandas as pd
             st.line_chart(pd.DataFrame({"الإغلاق": closes[-30:]}))
