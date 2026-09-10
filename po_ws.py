@@ -3,6 +3,8 @@ import json, time, threading, re, urllib.parse
 import socketio
 
 PO_WS_URLS = [
+    "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://demo-api.po.market/socket.io/?EIO=4&transport=websocket",
     "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
     "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
 ]
