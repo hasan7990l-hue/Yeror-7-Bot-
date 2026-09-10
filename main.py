@@ -109,36 +109,81 @@ def generate_signal(candles, short_period=5, long_period=20) -> Dict:
 
 
 async def _get_balance_async(acc: dict) -> float:
+    """
+    الحصول على الرصيد باستخدام نظام الأحداث في مكتبة pocket-option.
+    """
     client = PocketOptionClient()
+    
+    # استخراج معرف الجلسة من النص
+    session_id = acc["session"].split('"session":"')[1].split('"')[0]
+    
+    # تهيئة العميل مع تمرير الأصول والفترات لتفعيل الاشتراكات
     default_init(
         client,
         authorization=AuthorizationData.model_validate({
-            "session": acc["session"].split('"session":"')[1].split('"')[0],
+            "session": session_id,
             "isDemo": acc["is_demo"],
             "uid": acc["uid"],
             "platform": acc["platform"],
             "isFastHistory": True,
             "isOptimized": True,
         }),
+        sub_assets=["EURUSD_otc"],  # يمكن تعديلها حسب الحاجة
+        sub_period=60,
     )
+    
+    # متغير لتخزين الرصيد
+    balance_value = None
+    
+    # تعريف معالج الحدث لاستقبال الرصيد
+    @client.on.balance_success_update
+    async def on_balance_update(data):
+        nonlocal balance_value
+        print(f"[DEBUG] Balance update received: {data}")  # للتشخيص
+        # محاولة استخراج الرصيد من الحقول المحتملة
+        if isinstance(data, dict):
+            balance_value = data.get('balance', data.get('amount', data.get('value', 0)))
+        elif hasattr(data, 'balance'):
+            balance_value = data.balance
+        else:
+            balance_value = data  # افتراض أن البيانات هي الرصيد مباشرة
+    
+    # انتظار الاتصال والتفويض
     await asyncio.sleep(8)
-    bal = await client.balance()
+    
+    # طلب تحديث الرصيد
+    await client.emit.update_balance()
+    
+    # انتظار استلام الرصيد (مع مهلة 10 ثوانٍ)
+    timeout = 10
+    elapsed = 0
+    while balance_value is None and elapsed < timeout:
+        await asyncio.sleep(0.5)
+        elapsed += 0.5
+    
     await client.close()
-    return bal
+    
+    if balance_value is None:
+        raise TimeoutError("لم يتم استلام الرصيد خلال المهلة المحددة. تحقق من صحة الجلسة أو المكتبة.")
+    
+    return float(balance_value)
 
 
 async def _get_candles_async(acc: dict, asset: str, period: int) -> List:
     client = PocketOptionClient()
+    session_id = acc["session"].split('"session":"')[1].split('"')[0]
     default_init(
         client,
         authorization=AuthorizationData.model_validate({
-            "session": acc["session"].split('"session":"')[1].split('"')[0],
+            "session": session_id,
             "isDemo": acc["is_demo"],
             "uid": acc["uid"],
             "platform": acc["platform"],
             "isFastHistory": True,
             "isOptimized": True,
         }),
+        sub_assets=[asset],
+        sub_period=period,
     )
     await asyncio.sleep(8)
     candles = await client.get_candles(Asset(asset), period, 30)
