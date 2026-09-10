@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Tahoma,sans-serif;background:linear-gradient(-45deg,#0f172a,#1e293b,#1e3a8a,#0f172a);background-size:400% 400%;animation:bg 15s ease infinite;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+@keyframes bg{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+.card{background:rgba(30,41,59,0.85);backdrop-filter:blur(20px);border:1px solid rgba(34,211,238,0.35);border-radius:20px;padding:2.5rem;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,0.6)}
+h1{background:linear-gradient(90deg,#22d3ee,#3b82f6,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-align:center;font-size:1.8rem;margin-bottom:0.4rem}
+.sub{text-align:center;color:#94a3b8;margin-bottom:2rem;font-size:0.95rem}
+label{display:block;color:#cbd5e1;margin-bottom:0.4rem;font-size:0.9rem}
+input{width:100%;padding:0.85rem 1rem;background:rgba(15,23,42,0.8);border:1px solid rgba(34,211,238,0.25);border-radius:10px;color:#e2e8f0;font-size:1rem;margin-bottom:1.2rem}
+input:focus{outline:none;border-color:#22d3ee}
+button{width:100%;padding:0.95rem;background:linear-gradient(135deg,#0891b2,#22d3ee);color:#fff;border:none;border-radius:10px;font-size:1.05rem;font-weight:700;cursor:pointer}
+.error{background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);color:#fca5a5;padding:0.75rem 1rem;border-radius:10px;margin-bottom:1.2rem;text-align:center}
+</style></head>
+<body>
+<div class="card">
+<h1>OTC Signals</h1>
+<p class="sub">Sign in to access PocketOption</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="POST">
+<label>Username</label>
+<input type="text" name="username" required>
+<label>Password</label>
+<input type="password" name="password" required>
+<button type="submit">Login</button>
+</form>
+</div>
+</body></html>
