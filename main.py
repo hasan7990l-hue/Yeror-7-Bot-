@@ -183,48 +183,77 @@ def _diagnose_client(client) -> str:
     return "\n".join(lines)
 
 
-async def _explicit_connect(client) -> dict:
+# 🆕 عناوين WebSocket الرسمية لـ PocketOption (تُجرَّب بالترتيب)
+POCKETOPTION_WS_URLS = [
+    "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-asia.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-us.po.market/socket.io/?EIO=4&transport=websocket",
+]
+
+
+async def _explicit_connect(client, auth_data) -> dict:
     """
-    تحاول استدعاء أي دالة اتصال معروفة على كائن العميل بشكل صريح.
-    تُرجع قاموساً فيه: النتيجة، الدالة المستخدمة، الأخطاء.
+    محاولة الاتصال الصريح باستخدام connect(url, auth, wait, wait_timeout, retry).
+    التوقيع المكتشف من التشخيص:
+      connect(url, headers=None, auth=None, wait=True, wait_timeout=1, retry=False)
     """
     result = {"success": False, "used": None, "errors": []}
-    candidate_methods = [
-        "connect", "start", "run", "run_forever", "authorize",
-        "open", "login", "establish", "launch", "start_client",
-    ]
-    for name in candidate_methods:
-        if not hasattr(client, name):
-            continue
-        method = getattr(client, name)
-        if not callable(method):
-            continue
+
+    # محاولة تعيين authorization_data مباشرة على العميل أولاً
+    try:
+        client.authorization_data = auth_data
+        print(f"[DEBUG] تم تعيين client.authorization_data مباشرة.")
+    except Exception as e:
+        result["errors"].append(f"set authorization_data: {e}")
+
+    # تجربة كل عنوان WebSocket بالتتابع
+    for url in POCKETOPTION_WS_URLS:
         try:
-            ret = method()
-            # إذا كانت دالة async، ننتظرها
+            print(f"[DEBUG] محاولة الاتصال بـ: {url}")
+            ret = client.connect(
+                url=url,
+                auth=auth_data,
+                wait=True,
+                wait_timeout=20,
+                retry=True,
+            )
+            # إذا كانت دالة async ننتظرها
             if inspect.isawaitable(ret):
                 await ret
-            result["used"] = name
+            result["used"] = f"connect({url})"
             result["success"] = True
-            print(f"[DEBUG] _explicit_connect نجحت باستخدام: {name}")
+            print(f"[DEBUG] _explicit_connect نجحت باستخدام: connect({url})")
             return result
         except TypeError as te:
-            # قد تحتاج الدالة معاملات، نحاول بدونها ونتركها
-            result["errors"].append(f"{name} (TypeError): {te}")
+            result["errors"].append(f"connect({url}) TypeError: {te}")
+            print(f"[DEBUG] TypeError على {url}: {te}")
         except Exception as e:
-            result["errors"].append(f"{name}: {e}")
+            result["errors"].append(f"connect({url}): {e}")
+            print(f"[DEBUG] فشل الاتصال بـ {url}: {e}")
+
     return result
 
 
 async def _get_balance_async(acc: dict) -> float:
     """
     الحصول على الرصيد باستخدام نظام الأحداث في مكتبة pocket-option.
-    (مُصلَّحة: تنتظر الاتصال الفعلي قبل emit وتعيد المحاولة عند الفشل)
+    (مُصلَّحة: تستدعي connect الصريح مع URL و auth)
     """
     client = PocketOptionClient()
 
     # استخراج معرف الجلسة من النص
     session_id = acc["session"].split('"session":"')[1].split('"')[0]
+
+    # 🆕 بناء كائن التفويض مسبقاً (سيُستخدم في الاتصال)
+    auth_data = AuthorizationData.model_validate({
+        "session": session_id,
+        "isDemo": acc["is_demo"],
+        "uid": acc["uid"],
+        "platform": acc["platform"],
+        "isFastHistory": True,
+        "isOptimized": True,
+    })
 
     # متغير لتخزين الرصيد
     balance_value = None
@@ -245,26 +274,37 @@ async def _get_balance_async(acc: dict) -> float:
     # تهيئة العميل مع تمرير الأصول والفترات لتفعيل الاشتراكات
     default_init(
         client,
-        authorization=AuthorizationData.model_validate({
-            "session": session_id,
-            "isDemo": acc["is_demo"],
-            "uid": acc["uid"],
-            "platform": acc["platform"],
-            "isFastHistory": True,
-            "isOptimized": True,
-        }),
+        authorization=auth_data,
         sub_assets=["EURUSD_otc"],  # يمكن تعديلها حسب الحاجة
         sub_period=60,
     )
 
-    # 🆕 محاولة الاتصال الصريح أولاً (لأن default_init لا يتصل)
-    conn_result = await _explicit_connect(client)
+    # 🆕 محاولة الاتصال الصريح مع URL و auth
+    conn_result = await _explicit_connect(client, auth_data)
     print(f"[DEBUG] _explicit_connect result: {conn_result}")
 
-    # ✅ الإصلاح 1: انتظار الاتصال الفعلي بدلاً من sleep(8) الثابت
+    # ✅ الإصلاح 1: انتظار الاتصال الفعلي
     connected = await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
 
-    # ✅ الإصلاح 2: قراءة احتياطية من كائن العميل (إن وُجد رصيد مباشر)
+    # 🆕 انتظار التفويض عبر الدالة المدمجة (إن وُجدت)
+    authorized = False
+    if connected:
+        try:
+            if hasattr(client, "wait_for_authorization"):
+                ret = client.wait_for_authorization()
+                if inspect.isawaitable(ret):
+                    authorized = await asyncio.wait_for(ret, timeout=15)
+                else:
+                    authorized = ret
+                print(f"[DEBUG] wait_for_authorization -> {authorized}")
+            # فحص العلم is_authorized
+            if getattr(client, "is_authorized", False):
+                authorized = True
+                print("[DEBUG] client.is_authorized = True")
+        except Exception as e_auth:
+            print(f"[DEBUG] wait_for_authorization فشل: {e_auth}")
+
+    # ✅ الإصلاح 2: قراءة احتياطية من كائن العميل
     if balance_value is None:
         try:
             for attr in ("balance", "_balance", "account_balance", "current_balance"):
@@ -276,9 +316,9 @@ async def _get_balance_async(acc: dict) -> float:
         except Exception:
             pass
 
-    # ✅ الإصلاح 3: إعادة المحاولة على update_balance عند الفشل
+    # ✅ الإصلاح 3: إعادة المحاولة على update_balance
     last_emit_error = None
-    if balance_value is None:
+    if balance_value is None and connected:
         for attempt in range(1, 6):
             try:
                 await client.emit.update_balance()
@@ -288,7 +328,6 @@ async def _get_balance_async(acc: dict) -> float:
             except Exception as e_emit:
                 last_emit_error = e_emit
                 print(f"[DEBUG] update_balance attempt {attempt} failed: {e_emit}")
-                # إذا كان الخطأ هو عدم الاتصال، ننتظر قليلاً قبل المحاولة التالية
                 await asyncio.sleep(2)
 
     # انتظار استلام الرصيد (مع مهلة 10 ثوانٍ)
@@ -298,17 +337,17 @@ async def _get_balance_async(acc: dict) -> float:
         await asyncio.sleep(0.5)
         elapsed += 0.5
 
-    # ✅ الإصلاح 4: إغلاق آمن حتى لو حدث خطأ
+    # ✅ الإصلاح 4: إغلاق آمن
     try:
         await client.close()
     except Exception:
         pass
 
     if balance_value is None:
-        # 🆕 إضافة تشخيص كامل عند الفشل
         diagnosis = _diagnose_client(client)
         extra = f" | آخر خطأ إرسال: {last_emit_error}" if last_emit_error else ""
         extra += f" | متصل: {connected}"
+        extra += f" | مُفوَّض: {authorized}"
         extra += f" | نتيجة الاتصال الصريح: {conn_result}"
         raise TimeoutError(
             f"لم يتم استلام الرصيد خلال المهلة المحددة.{extra}\n\n{diagnosis}"
@@ -320,23 +359,37 @@ async def _get_balance_async(acc: dict) -> float:
 async def _get_candles_async(acc: dict, asset: str, period: int) -> List:
     client = PocketOptionClient()
     session_id = acc["session"].split('"session":"')[1].split('"')[0]
+
+    # 🆕 بناء كائن التفويض مسبقاً
+    auth_data = AuthorizationData.model_validate({
+        "session": session_id,
+        "isDemo": acc["is_demo"],
+        "uid": acc["uid"],
+        "platform": acc["platform"],
+        "isFastHistory": True,
+        "isOptimized": True,
+    })
+
     default_init(
         client,
-        authorization=AuthorizationData.model_validate({
-            "session": session_id,
-            "isDemo": acc["is_demo"],
-            "uid": acc["uid"],
-            "platform": acc["platform"],
-            "isFastHistory": True,
-            "isOptimized": True,
-        }),
+        authorization=auth_data,
         sub_assets=[asset],
         sub_period=period,
     )
-    # 🆕 محاولة الاتصال الصريح أيضاً
-    await _explicit_connect(client)
-    # ✅ إصلاح مماثل: انتظار الاتصال الفعلي بدلاً من sleep(8)
+    # 🆕 محاولة الاتصال الصريح مع URL و auth
+    await _explicit_connect(client, auth_data)
+    # ✅ إصلاح مماثل: انتظار الاتصال الفعلي
     await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
+
+    # 🆕 انتظار التفويض
+    try:
+        if hasattr(client, "wait_for_authorization"):
+            ret = client.wait_for_authorization()
+            if inspect.isawaitable(ret):
+                await asyncio.wait_for(ret, timeout=15)
+    except Exception:
+        pass
+
     candles = await client.get_candles(Asset(asset), period, 30)
     try:
         await client.close()
@@ -359,12 +412,10 @@ def verify_login(email, password):
 st.set_page_config(page_title="إشارات OTC", page_icon="📈", layout="wide")
 
 # ============================================================
-# 🎨 CSS جديد كامل - خلفية متحركة + تأثيرات زجاجية + رسائل ترحيب
-# (لم يُحذف أي سطر سابق، هذا قسم CSS موسّع بالكامل)
+# 🎨 CSS كامل - خلفية متحركة + تأثيرات زجاجية + رسائل ترحيب
 # ============================================================
 st.markdown("""
 <style>
-/* ===== الخلفية المتحركة العامة ===== */
 @keyframes gradientBG {
     0% { background-position: 0% 50%; }
     50% { background-position: 100% 50%; }
@@ -376,7 +427,6 @@ st.markdown("""
     animation: gradientBG 18s ease infinite;
     min-height: 100vh;
 }
-/* تعتيم خفيف للحفاظ على وضوح النص */
 .stApp::before {
     content: "";
     position: fixed;
@@ -386,7 +436,6 @@ st.markdown("""
     pointer-events: none;
     z-index: 0;
 }
-/* ===== العناوين ===== */
 .main-title {
     font-size: 2.6rem;
     font-weight: 900;
@@ -408,7 +457,6 @@ st.markdown("""
     margin-bottom: 1.5rem;
     letter-spacing: 0.5px;
 }
-/* ===== رسالة ترحيب ===== */
 @keyframes welcomeFade {
     0% { opacity: 0; transform: translateY(-15px); }
     100% { opacity: 1; transform: translateY(0); }
@@ -458,7 +506,6 @@ st.markdown("""
     color: #fbbf24;
     font-weight: 700;
 }
-/* ===== بطاقات المعلومات ===== */
 .info-card {
     background: rgba(30,41,59,0.75);
     border: 1px solid rgba(148,163,184,0.15);
@@ -469,7 +516,6 @@ st.markdown("""
     box-shadow: 0 4px 20px rgba(0,0,0,0.25);
     color: #e2e8f0;
 }
-/* ===== الأزرار ===== */
 .stButton > button {
     background: linear-gradient(135deg, #1e3a8a, #3b82f6) !important;
     color: #fff !important;
@@ -485,7 +531,6 @@ st.markdown("""
     box-shadow: 0 8px 22px rgba(59,130,246,0.55) !important;
     background: linear-gradient(135deg, #3b82f6, #22d3ee) !important;
 }
-/* زر أساسي (primary) */
 .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #0891b2, #22d3ee) !important;
     box-shadow: 0 4px 14px rgba(34,211,238,0.45) !important;
@@ -494,18 +539,15 @@ st.markdown("""
     background: linear-gradient(135deg, #22d3ee, #67e8f9) !important;
     box-shadow: 0 8px 26px rgba(34,211,238,0.7) !important;
 }
-/* ===== الإشارات ===== */
 .signal-call{background:linear-gradient(90deg,#00c853,#64dd17);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800;box-shadow:0 6px 24px rgba(0,200,83,0.45)}
 .signal-put{background:linear-gradient(90deg,#d50000,#ff1744);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800;box-shadow:0 6px 24px rgba(213,0,0,0.45)}
 .signal-neutral{background:linear-gradient(90deg,#616161,#9e9e9e);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800}
-/* ===== صندوق التذكير ===== */
 @keyframes pulseGlow {
     0% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
     50% { transform: scale(1.02); box-shadow: 0 6px 25px rgba(245,158,11,0.8); }
     100% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
 }
 .reminder-box{animation:pulseGlow 1.5s infinite;background:linear-gradient(90deg,#f59e0b,#fbbf24);padding:1.2rem;border-radius:12px;color:#1f2937;text-align:center;font-size:1.15rem;font-weight:bold;margin-top:1rem}
-/* ===== الشريط الجانبي ===== */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(30,41,59,0.98)) !important;
     border-right: 1px solid rgba(34,211,238,0.15);
@@ -513,11 +555,9 @@ section[data-testid="stSidebar"] {
 section[data-testid="stSidebar"] * {
     color: #e2e8f0 !important;
 }
-/* ===== شريط التقدم (Streamlit) ===== */
 .stProgress > div > div > div > div {
     background: linear-gradient(90deg, #22d3ee, #3b82f6);
 }
-/* ===== الفواصل ===== */
 hr { border-color: rgba(34,211,238,0.15) !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -533,7 +573,6 @@ if not st.session_state.logged_in:
     st.markdown('<div class="main-title">📈 إشارات OTC الاحترافية</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">منصة التداول الذكية — إصدار 2099</div>', unsafe_allow_html=True)
 
-    # 🆕 رسالة ترحيب جذابة (في شاشة الدخول)
     st.markdown("""
     <div class="welcome-box">
         <h2>👋 أهلاً بك في منصة إشارات OTC</h2>
@@ -598,7 +637,6 @@ st.markdown('<div class="sub-title">لوحة التحكم الرئيسية — �
 
 acc = user["accounts"][st.session_state.selected_account]
 
-# 🆕 رسالة ترحيب بعد تسجيل الدخول (بجانب معلومات الحساب)
 st.markdown(f"""
 <div class="welcome-box">
     <h2>🌟 مرحباً بك، أيها المتداول</h2>
@@ -622,13 +660,11 @@ col_conn1, col_conn2 = st.columns([1, 2])
 
 with col_conn1:
     if st.button("🚀 بدء الاتصال (عد تنازلي 15 ثانية)", type="primary", key="connect_countdown_btn"):
-        # إعادة تعيين الحالة عند بدء اتصال جديد
         st.session_state.connection_ready = False
 
         countdown_placeholder = st.empty()
         total_seconds = 15
 
-        # عرض العد التنازلي مع شريط التقدم
         for i in range(total_seconds, 0, -1):
             progress = (total_seconds - i) / total_seconds * 100
             countdown_placeholder.markdown(
@@ -644,7 +680,6 @@ with col_conn1:
             )
             time.sleep(1)
 
-        # عند انتهاء العد التنازلي
         countdown_placeholder.markdown(
             """
             <div style="background:linear-gradient(90deg,#00c853,#64dd17);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold;box-shadow:0 4px 15px rgba(0,200,83,0.4)">
@@ -653,7 +688,7 @@ with col_conn1:
             """,
             unsafe_allow_html=True
         )
-        time.sleep(1.2)  # إظهار رسالة النجاح لثانيتين قبل إعادة التحميل
+        time.sleep(1.2)
         st.session_state.connection_ready = True
         st.rerun()
 
@@ -681,7 +716,6 @@ with c1:
             with st.spinner("جاري سحب الرصيد..."):
                 bal = asyncio.run(_get_balance_async(acc))
                 st.success(f"💰 الرصيد: **{bal}**")
-                # عند نجاح سحب الرصيد، إخفاء التذكير (الاتصال اكتمل فعلاً)
                 st.session_state.connection_ready = False
         except Exception as e:
             st.error(f"❌ فشل: {e}")
