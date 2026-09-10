@@ -1,4 +1,5 @@
-python-telegram-bot>=21.11.1
-flask[async]>=2.3.3
-pocketoptionapi2
-requests>=2.31.0
+python-telegram-bot==20.3
+Flask==3.0.0
+requests
+websocket-client
+git+https://github.com/tech-me-out/pocketoptionapi.git
