@@ -111,19 +111,14 @@ def generate_signal(candles, short_period=5, long_period=20) -> Dict:
 
 
 # ============================================================
-# 🔧 دالة انتظار الاتصال (دالة مساعدة أُضيفت دون حذف أي شيء)
+# 🔧 دالة انتظار الاتصال
 # ============================================================
-async def _wait_for_socket_connection(client, max_wait: float = 30.0, step: float = 0.5) -> bool:
-    """
-    تنتظر حتى يتم الاتصال فعلياً بـ Socket.IO عبر فحص عدة خصائص محتملة.
-    تُرجع True إذا تم الاتصال، وإلا False بعد انتهاء المهلة.
-    """
+async def _wait_for_socket_connection(client, max_wait: float = 30.0, step: float = 0.5, progress_cb=None) -> bool:
     waited = 0.0
     while waited < max_wait:
         await asyncio.sleep(step)
         waited += step
         try:
-            # فحص عدة أسماء محتملة لكائن Socket.IO
             sio = (getattr(client, "sio", None)
                    or getattr(client, "_sio", None)
                    or getattr(client, "socket", None)
@@ -131,29 +126,28 @@ async def _wait_for_socket_connection(client, max_wait: float = 30.0, step: floa
             if sio is not None and getattr(sio, "connected", False):
                 print(f"[DEBUG] Socket connected after {waited:.1f}s")
                 return True
-            # فحص خصائص الاتصال على العميل نفسه
             if getattr(client, "is_connected", False):
                 print(f"[DEBUG] client.is_connected=True after {waited:.1f}s")
                 return True
         except Exception:
             pass
+        if progress_cb and int(waited) % 2 == 0:
+            try:
+                progress_cb(f"⏳ انتظار الاتصال بـ Socket... ({waited:.0f}s / {max_wait:.0f}s)")
+            except Exception:
+                pass
     print(f"[DEBUG] Socket NOT connected after {max_wait}s")
     return False
 
 
 # ============================================================
-# 🆕 دوال تشخيص واتصال صريح (جديدة بالكامل، لم تُحذف أي أسطر سابقة)
+# 🆕 دوال تشخيص واتصال صريح
 # ============================================================
 def _diagnose_client(client) -> str:
-    """
-    تُرجع نصاً يحتوي على جميع الطرق والخصائص المتاحة على كائن العميل،
-    لمساعدتنا في معرفة طريقة الاتصال الصحيحة.
-    """
     lines = []
     lines.append("=== تشخيص كائن PocketOptionClient ===")
     lines.append(f"النوع: {type(client).__name__}")
     lines.append(f"الوحدة: {type(client).__module__}")
-    lines.append("--- الخصائص (attributes) ---")
     try:
         attrs = [a for a in dir(client) if not a.startswith("__")]
     except Exception:
@@ -168,22 +162,10 @@ def _diagnose_client(client) -> str:
                 lines.append(f"  • {a} = {kind}")
         except Exception as e:
             lines.append(f"  • {a} = <خطأ: {e}>")
-
-    lines.append("--- دوال الاتصال المحتملة ---")
-    for name in ("connect", "start", "run", "run_forever", "authorize", "open",
-                 "login", "establish", "init", "launch", "start_client"):
-        if hasattr(client, name):
-            attr = getattr(client, name)
-            if callable(attr):
-                try:
-                    sig = str(inspect.signature(attr))
-                except Exception:
-                    sig = "(?)"
-                lines.append(f"  ✅ {name}{sig}")
     return "\n".join(lines)
 
 
-# 🆕 عناوين WebSocket الرسمية لـ PocketOption (تُجرَّب بالترتيب)
+# 🆕 عناوين WebSocket الرسمية لـ PocketOption
 POCKETOPTION_WS_URLS = [
     "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
     "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
@@ -192,24 +174,19 @@ POCKETOPTION_WS_URLS = [
 ]
 
 
-async def _explicit_connect(client, auth_data) -> dict:
-    """
-    محاولة الاتصال الصريح باستخدام connect(url, auth, wait, wait_timeout, retry).
-    التوقيع المكتشف من التشخيص:
-      connect(url, headers=None, auth=None, wait=True, wait_timeout=1, retry=False)
-    """
+async def _explicit_connect(client, auth_data, progress_cb=None) -> dict:
     result = {"success": False, "used": None, "errors": []}
 
-    # محاولة تعيين authorization_data مباشرة على العميل أولاً
     try:
         client.authorization_data = auth_data
         print(f"[DEBUG] تم تعيين client.authorization_data مباشرة.")
     except Exception as e:
         result["errors"].append(f"set authorization_data: {e}")
 
-    # تجربة كل عنوان WebSocket بالتتابع
     for url in POCKETOPTION_WS_URLS:
         try:
+            if progress_cb:
+                progress_cb(f"🔌 محاولة الاتصال بـ: {url.split('//')[1].split('/')[0]}...")
             print(f"[DEBUG] محاولة الاتصال بـ: {url}")
             ret = client.connect(
                 url=url,
@@ -218,7 +195,6 @@ async def _explicit_connect(client, auth_data) -> dict:
                 wait_timeout=20,
                 retry=True,
             )
-            # إذا كانت دالة async ننتظرها
             if inspect.isawaitable(ret):
                 await ret
             result["used"] = f"connect({url})"
@@ -235,17 +211,23 @@ async def _explicit_connect(client, auth_data) -> dict:
     return result
 
 
-async def _get_balance_async(acc: dict) -> float:
+async def _get_balance_async(acc: dict, progress_cb=None) -> float:
     """
-    الحصول على الرصيد باستخدام نظام الأحداث في مكتبة pocket-option.
-    (مُصلَّحة: تستدعي connect الصريح مع URL و auth)
+    الحصول على الرصيد - مع دعم تتبع حي للعملية.
     """
+    def _p(msg):
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+        print(f"[PROGRESS] {msg}")
+
+    _p("🔄 المرحلة 1/4: تهيئة العميل...")
     client = PocketOptionClient()
 
-    # استخراج معرف الجلسة من النص
     session_id = acc["session"].split('"session":"')[1].split('"')[0]
 
-    # 🆕 بناء كائن التفويض مسبقاً (سيُستخدم في الاتصال)
     auth_data = AuthorizationData.model_validate({
         "session": session_id,
         "isDemo": acc["is_demo"],
@@ -255,56 +237,59 @@ async def _get_balance_async(acc: dict) -> float:
         "isOptimized": True,
     })
 
-    # متغير لتخزين الرصيد
     balance_value = None
 
-    # تعريف معالج الحدث لاستقبال الرصيد
     @client.on.balance_success_update
     async def on_balance_update(data):
         nonlocal balance_value
-        print(f"[DEBUG] Balance update received: {data}")  # للتشخيص
-        # محاولة استخراج الرصيد من الحقول المحتملة
+        print(f"[DEBUG] Balance update received: {data}")
         if isinstance(data, dict):
             balance_value = data.get('balance', data.get('amount', data.get('value', 0)))
         elif hasattr(data, 'balance'):
             balance_value = data.balance
         else:
-            balance_value = data  # افتراض أن البيانات هي الرصيد مباشرة
+            balance_value = data
 
-    # تهيئة العميل مع تمرير الأصول والفترات لتفعيل الاشتراكات
     default_init(
         client,
         authorization=auth_data,
-        sub_assets=["EURUSD_otc"],  # يمكن تعديلها حسب الحاجة
+        sub_assets=["EURUSD_otc"],
         sub_period=60,
     )
 
-    # 🆕 محاولة الاتصال الصريح مع URL و auth
-    conn_result = await _explicit_connect(client, auth_data)
+    _p("🔄 المرحلة 2/4: الاتصال بـ WebSocket...")
+    conn_result = await _explicit_connect(client, auth_data, progress_cb=_p)
     print(f"[DEBUG] _explicit_connect result: {conn_result}")
 
-    # ✅ الإصلاح 1: انتظار الاتصال الفعلي
-    connected = await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
+    if not conn_result.get("success"):
+        # فشل الاتصال بكل العناوين
+        diagnosis = _diagnose_client(client)
+        raise TimeoutError(
+            f"❌ فشل الاتصال بجميع عناوين WebSocket.\n"
+            f"الأخطاء: {conn_result.get('errors')}\n\n"
+            f"⚠️ ملاحظة: Streamlit Cloud قد يحجب اتصالات WebSocket الصادرة.\n\n"
+            f"{diagnosis}"
+        )
 
-    # 🆕 انتظار التفويض عبر الدالة المدمجة (إن وُجدت)
+    _p("🔄 المرحلة 3/4: انتظار التفويض...")
+    connected = await _wait_for_socket_connection(client, max_wait=15.0, step=0.5, progress_cb=_p)
+
     authorized = False
     if connected:
         try:
             if hasattr(client, "wait_for_authorization"):
                 ret = client.wait_for_authorization()
                 if inspect.isawaitable(ret):
-                    authorized = await asyncio.wait_for(ret, timeout=15)
+                    authorized = await asyncio.wait_for(ret, timeout=10)
                 else:
                     authorized = ret
                 print(f"[DEBUG] wait_for_authorization -> {authorized}")
-            # فحص العلم is_authorized
             if getattr(client, "is_authorized", False):
                 authorized = True
-                print("[DEBUG] client.is_authorized = True")
         except Exception as e_auth:
             print(f"[DEBUG] wait_for_authorization فشل: {e_auth}")
 
-    # ✅ الإصلاح 2: قراءة احتياطية من كائن العميل
+    # قراءة احتياطية
     if balance_value is None:
         try:
             for attr in ("balance", "_balance", "account_balance", "current_balance"):
@@ -316,28 +301,26 @@ async def _get_balance_async(acc: dict) -> float:
         except Exception:
             pass
 
-    # ✅ الإصلاح 3: إعادة المحاولة على update_balance
+    _p("🔄 المرحلة 4/4: طلب الرصيد...")
     last_emit_error = None
     if balance_value is None and connected:
-        for attempt in range(1, 6):
+        for attempt in range(1, 4):
             try:
                 await client.emit.update_balance()
-                print(f"[DEBUG] update_balance emitted successfully on attempt {attempt}")
+                print(f"[DEBUG] update_balance emitted attempt {attempt}")
                 last_emit_error = None
                 break
             except Exception as e_emit:
                 last_emit_error = e_emit
                 print(f"[DEBUG] update_balance attempt {attempt} failed: {e_emit}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
 
-    # انتظار استلام الرصيد (مع مهلة 10 ثوانٍ)
-    timeout = 10
+    # انتظار استلام الرصيد (5 ثوانٍ فقط)
     elapsed = 0
-    while balance_value is None and elapsed < timeout:
+    while balance_value is None and elapsed < 5:
         await asyncio.sleep(0.5)
         elapsed += 0.5
 
-    # ✅ الإصلاح 4: إغلاق آمن
     try:
         await client.close()
     except Exception:
@@ -348,19 +331,26 @@ async def _get_balance_async(acc: dict) -> float:
         extra = f" | آخر خطأ إرسال: {last_emit_error}" if last_emit_error else ""
         extra += f" | متصل: {connected}"
         extra += f" | مُفوَّض: {authorized}"
-        extra += f" | نتيجة الاتصال الصريح: {conn_result}"
         raise TimeoutError(
-            f"لم يتم استلام الرصيد خلال المهلة المحددة.{extra}\n\n{diagnosis}"
+            f"لم يتم استلام الرصيد.{extra}\n\n{diagnosis}"
         )
 
     return float(balance_value)
 
 
-async def _get_candles_async(acc: dict, asset: str, period: int) -> List:
+async def _get_candles_async(acc: dict, asset: str, period: int, progress_cb=None) -> List:
+    def _p(msg):
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+        print(f"[PROGRESS] {msg}")
+
+    _p("🔄 تهيئة العميل للشموع...")
     client = PocketOptionClient()
     session_id = acc["session"].split('"session":"')[1].split('"')[0]
 
-    # 🆕 بناء كائن التفويض مسبقاً
     auth_data = AuthorizationData.model_validate({
         "session": session_id,
         "isDemo": acc["is_demo"],
@@ -376,20 +366,20 @@ async def _get_candles_async(acc: dict, asset: str, period: int) -> List:
         sub_assets=[asset],
         sub_period=period,
     )
-    # 🆕 محاولة الاتصال الصريح مع URL و auth
-    await _explicit_connect(client, auth_data)
-    # ✅ إصلاح مماثل: انتظار الاتصال الفعلي
-    await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
 
-    # 🆕 انتظار التفويض
+    _p("🔌 الاتصال للشموع...")
+    await _explicit_connect(client, auth_data, progress_cb=_p)
+    await _wait_for_socket_connection(client, max_wait=15.0, step=0.5, progress_cb=_p)
+
     try:
         if hasattr(client, "wait_for_authorization"):
             ret = client.wait_for_authorization()
             if inspect.isawaitable(ret):
-                await asyncio.wait_for(ret, timeout=15)
+                await asyncio.wait_for(ret, timeout=10)
     except Exception:
         pass
 
+    _p("📊 جلب الشموع...")
     candles = await client.get_candles(Asset(asset), period, 30)
     try:
         await client.close()
@@ -411,9 +401,6 @@ def verify_login(email, password):
 # ============================================================
 st.set_page_config(page_title="إشارات OTC", page_icon="📈", layout="wide")
 
-# ============================================================
-# 🎨 CSS كامل - خلفية متحركة + تأثيرات زجاجية + رسائل ترحيب
-# ============================================================
 st.markdown("""
 <style>
 @keyframes gradientBG {
@@ -548,6 +535,7 @@ st.markdown("""
     100% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
 }
 .reminder-box{animation:pulseGlow 1.5s infinite;background:linear-gradient(90deg,#f59e0b,#fbbf24);padding:1.2rem;border-radius:12px;color:#1f2937;text-align:center;font-size:1.15rem;font-weight:bold;margin-top:1rem}
+.progress-box{background:rgba(30,41,59,0.95);border:1px solid rgba(34,211,238,0.4);border-radius:12px;padding:1rem;color:#22d3ee;font-family:monospace;font-size:0.95rem;margin:0.5rem 0;box-shadow:0 4px 15px rgba(34,211,238,0.2)}
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(30,41,59,0.98)) !important;
     border-right: 1px solid rgba(34,211,238,0.15);
@@ -710,43 +698,124 @@ st.markdown("---")
 
 
 c1, c2, c3 = st.columns(3)
+
+# ============================================================
+# 🆕 قسم الرصيد مع شريط تقدم حي
+# ============================================================
 with c1:
     if st.button("💰 عرض الرصيد", type="primary"):
+        # 🆕 مكان مخصص لعرض المراحل الحية
+        progress_placeholder = st.empty()
+
+        def _on_progress(msg):
+            """دالة تُستدعى من داخل العملية لتحديث الشاشة فورياً."""
+            try:
+                progress_placeholder.markdown(
+                    f'<div class="progress-box">🟢 {msg}</div>',
+                    unsafe_allow_html=True
+                )
+            except Exception:
+                pass
+
         try:
-            with st.spinner("جاري سحب الرصيد..."):
-                bal = asyncio.run(_get_balance_async(acc))
+            with st.spinner("جاري سحب الرصيد (قد يستغرق حتى 60 ثانية)..."):
+                # 🆕 حد زمني صارم: 90 ثانية كحد أقصى
+                bal = asyncio.run(
+                    asyncio.wait_for(
+                        _get_balance_async(acc, progress_cb=_on_progress),
+                        timeout=90
+                    )
+                )
+                progress_placeholder.markdown(
+                    f'<div class="progress-box" style="border-color:#22c55e;color:#22c55e">✅ اكتمل بنجاح! الرصيد: {bal}</div>',
+                    unsafe_allow_html=True
+                )
                 st.success(f"💰 الرصيد: **{bal}**")
                 st.session_state.connection_ready = False
+        except asyncio.TimeoutError:
+            progress_placeholder.markdown(
+                '<div class="progress-box" style="border-color:#ef4444;color:#ef4444">❌ تجاوز الحد الزمني (90 ثانية)</div>',
+                unsafe_allow_html=True
+            )
+            st.error("⏱️ **تجاوز الحد الزمني (90 ثانية).**\n\nالسبب المحتمل: Streamlit Cloud قد يحجب اتصالات WebSocket الصادرة. جرّب:")
+            st.markdown("""
+            - 🔹 استخدم **VPS** أو **خادم محلي** بدلاً من Streamlit Cloud.
+            - 🔹 تحقق من صلاحية الجلسة (Session) — انسخ جلسة جديدة من PocketOption عبر F12 → Network → WebSocket.
+            - 🔹 راجع السجلات (Logs) في Streamlit Cloud لمعرفة آخر رسالة `[PROGRESS]`.
+            """)
         except Exception as e:
+            progress_placeholder.markdown(
+                f'<div class="progress-box" style="border-color:#ef4444;color:#ef4444">❌ فشل: {str(e)[:150]}...</div>',
+                unsafe_allow_html=True
+            )
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
 
+# ============================================================
+# 🆕 قسم الإشارة الفورية مع شريط تقدم حي
+# ============================================================
 with c2:
     if st.button("📈 إشارة فورية"):
+        progress_placeholder2 = st.empty()
+
+        def _on_progress2(msg):
+            try:
+                progress_placeholder2.markdown(
+                    f'<div class="progress-box">🟢 {msg}</div>',
+                    unsafe_allow_html=True
+                )
+            except Exception:
+                pass
+
         try:
             with st.spinner("جاري التحليل..."):
-                candles = asyncio.run(_get_candles_async(acc, symbol, int(period)))
+                candles = asyncio.run(
+                    asyncio.wait_for(
+                        _get_candles_async(acc, symbol, int(period), progress_cb=_on_progress2),
+                        timeout=90
+                    )
+                )
                 if candles:
                     st.session_state.last_candles = candles
                     st.session_state.last_signal = generate_signal(candles)
                     st.rerun()
                 else:
                     st.error("❌ لا توجد بيانات.")
+        except asyncio.TimeoutError:
+            st.error("⏱️ تجاوز الحد الزمني (90 ثانية). Streamlit Cloud قد يحجب WebSocket.")
         except Exception as e:
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
 
 with c3:
     if st.button("📊 آخر بيانات السوق"):
+        progress_placeholder3 = st.empty()
+
+        def _on_progress3(msg):
+            try:
+                progress_placeholder3.markdown(
+                    f'<div class="progress-box">🟢 {msg}</div>',
+                    unsafe_allow_html=True
+                )
+            except Exception:
+                pass
+
         try:
             with st.spinner("جاري الجلب..."):
-                candles = asyncio.run(_get_candles_async(acc, symbol, int(period)))
+                candles = asyncio.run(
+                    asyncio.wait_for(
+                        _get_candles_async(acc, symbol, int(period), progress_cb=_on_progress3),
+                        timeout=90
+                    )
+                )
                 if candles:
                     st.session_state.last_candles = candles
                     st.session_state.last_signal = generate_signal(candles)
                     st.rerun()
                 else:
                     st.error("❌ لا توجد بيانات.")
+        except asyncio.TimeoutError:
+            st.error("⏱️ تجاوز الحد الزمني (90 ثانية).")
         except Exception as e:
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
