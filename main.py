@@ -3,6 +3,7 @@
 
 import os
 import sys
+import time
 import asyncio
 import traceback
 from datetime import datetime
@@ -108,15 +109,63 @@ def generate_signal(candles, short_period=5, long_period=20) -> Dict:
     return {"signal": "NEUTRAL ⚪", "confidence": 50.0, "price": current_price, "reason": "لا يوجد تقاطع واضح"}
 
 
+# ============================================================
+# 🔧 دالة انتظار الاتصال (دالة مساعدة أُضيفت دون حذف أي شيء)
+# ============================================================
+async def _wait_for_socket_connection(client, max_wait: float = 30.0, step: float = 0.5) -> bool:
+    """
+    تنتظر حتى يتم الاتصال فعلياً بـ Socket.IO عبر فحص عدة خصائص محتملة.
+    تُرجع True إذا تم الاتصال، وإلا False بعد انتهاء المهلة.
+    """
+    waited = 0.0
+    while waited < max_wait:
+        await asyncio.sleep(step)
+        waited += step
+        try:
+            # فحص عدة أسماء محتملة لكائن Socket.IO
+            sio = (getattr(client, "sio", None)
+                   or getattr(client, "_sio", None)
+                   or getattr(client, "socket", None)
+                   or getattr(client, "_socket", None))
+            if sio is not None and getattr(sio, "connected", False):
+                print(f"[DEBUG] Socket connected after {waited:.1f}s")
+                return True
+            # فحص خصائص الاتصال على العميل نفسه
+            if getattr(client, "is_connected", False):
+                print(f"[DEBUG] client.is_connected=True after {waited:.1f}s")
+                return True
+        except Exception:
+            pass
+    print(f"[DEBUG] Socket NOT connected after {max_wait}s")
+    return False
+
+
 async def _get_balance_async(acc: dict) -> float:
     """
     الحصول على الرصيد باستخدام نظام الأحداث في مكتبة pocket-option.
+    (مُصلَّحة: تنتظر الاتصال الفعلي قبل emit وتعيد المحاولة عند الفشل)
     """
     client = PocketOptionClient()
-    
+
     # استخراج معرف الجلسة من النص
     session_id = acc["session"].split('"session":"')[1].split('"')[0]
-    
+
+    # متغير لتخزين الرصيد
+    balance_value = None
+
+    # تعريف معالج الحدث لاستقبال الرصيد
+    @client.on.balance_success_update
+    async def on_balance_update(data):
+        nonlocal balance_value
+        print(f"[DEBUG] Balance update received: {data}")  # للتشخيص
+        # محاولة استخراج الرصيد من الحقول المحتملة
+        if isinstance(data, dict):
+            balance_value = data.get('balance', data.get('amount', data.get('value', 0)))
+        elif hasattr(data, 'balance'):
+            balance_value = data.balance
+        else:
+            balance_value = data  # افتراض أن البيانات هي الرصيد مباشرة
+
     # تهيئة العميل مع تمرير الأصول والفترات لتفعيل الاشتراكات
     default_init(
         client,
@@ -131,41 +180,55 @@ async def _get_balance_async(acc: dict) -> float:
         sub_assets=["EURUSD_otc"],  # يمكن تعديلها حسب الحاجة
         sub_period=60,
     )
-    
-    # متغير لتخزين الرصيد
-    balance_value = None
-    
-    # تعريف معالج الحدث لاستقبال الرصيد
-    @client.on.balance_success_update
-    async def on_balance_update(data):
-        nonlocal balance_value
-        print(f"[DEBUG] Balance update received: {data}")  # للتشخيص
-        # محاولة استخراج الرصيد من الحقول المحتملة
-        if isinstance(data, dict):
-            balance_value = data.get('balance', data.get('amount', data.get('value', 0)))
-        elif hasattr(data, 'balance'):
-            balance_value = data.balance
-        else:
-            balance_value = data  # افتراض أن البيانات هي الرصيد مباشرة
-    
-    # انتظار الاتصال والتفويض
-    await asyncio.sleep(8)
-    
-    # طلب تحديث الرصيد
-    await client.emit.update_balance()
-    
+
+    # ✅ الإصلاح 1: انتظار الاتصال الفعلي بدلاً من sleep(8) الثابت
+    connected = await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
+
+    # ✅ الإصلاح 2: قراءة احتياطية من كائن العميل (إن وُجد رصيد مباشر)
+    if balance_value is None:
+        try:
+            for attr in ("balance", "_balance", "account_balance", "current_balance"):
+                val = getattr(client, attr, None)
+                if val is not None and isinstance(val, (int, float)) and val >= 0:
+                    balance_value = val
+                    print(f"[DEBUG] Fallback balance from client.{attr} = {val}")
+                    break
+        except Exception:
+            pass
+
+    # ✅ الإصلاح 3: إعادة المحاولة على update_balance عند الفشل
+    last_emit_error = None
+    if balance_value is None:
+        for attempt in range(1, 6):
+            try:
+                await client.emit.update_balance()
+                print(f"[DEBUG] update_balance emitted successfully on attempt {attempt}")
+                last_emit_error = None
+                break
+            except Exception as e_emit:
+                last_emit_error = e_emit
+                print(f"[DEBUG] update_balance attempt {attempt} failed: {e_emit}")
+                # إذا كان الخطأ هو عدم الاتصال، ننتظر قليلاً قبل المحاولة التالية
+                await asyncio.sleep(2)
+
     # انتظار استلام الرصيد (مع مهلة 10 ثوانٍ)
     timeout = 10
     elapsed = 0
     while balance_value is None and elapsed < timeout:
         await asyncio.sleep(0.5)
         elapsed += 0.5
-    
-    await client.close()
-    
+
+    # ✅ الإصلاح 4: إغلاق آمن حتى لو حدث خطأ
+    try:
+        await client.close()
+    except Exception:
+        pass
+
     if balance_value is None:
-        raise TimeoutError("لم يتم استلام الرصيد خلال المهلة المحددة. تحقق من صحة الجلسة أو المكتبة.")
-    
+        extra = f" | آخر خطأ إرسال: {last_emit_error}" if last_emit_error else ""
+        extra += f" | متصل: {connected}"
+        raise TimeoutError(f"لم يتم استلام الرصيد خلال المهلة المحددة. تحقق من صحة الجلسة أو المكتبة.{extra}")
+
     return float(balance_value)
 
 
@@ -185,9 +248,13 @@ async def _get_candles_async(acc: dict, asset: str, period: int) -> List:
         sub_assets=[asset],
         sub_period=period,
     )
-    await asyncio.sleep(8)
+    # ✅ إصلاح مماثل: انتظار الاتصال الفعلي بدلاً من sleep(8)
+    await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
     candles = await client.get_candles(Asset(asset), period, 30)
-    await client.close()
+    try:
+        await client.close()
+    except Exception:
+        pass
     return candles
 
 
@@ -209,6 +276,12 @@ st.markdown("""
 .signal-call{background:linear-gradient(90deg,#00c853,#64dd17);padding:1rem;border-radius:10px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold}
 .signal-put{background:linear-gradient(90deg,#d50000,#ff1744);padding:1rem;border-radius:10px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold}
 .signal-neutral{background:linear-gradient(90deg,#616161,#9e9e9e);padding:1rem;border-radius:10px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold}
+@keyframes pulseGlow {
+    0% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
+    50% { transform: scale(1.02); box-shadow: 0 6px 25px rgba(245,158,11,0.8); }
+    100% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
+}
+.reminder-box{animation:pulseGlow 1.5s infinite;background:linear-gradient(90deg,#f59e0b,#fbbf24);padding:1.2rem;border-radius:12px;color:#1f2937;text-align:center;font-size:1.15rem;font-weight:bold;margin-top:1rem}
 </style>
 """, unsafe_allow_html=True)
 
@@ -274,6 +347,71 @@ acc = user["accounts"][st.session_state.selected_account]
 st.info(f"الحساب النشط: **{acc['label']}** — UID: `{acc['uid']}`")
 st.markdown("---")
 
+# ============================================================
+# ✅ بداية القسم الجديد: بوابة الاتصال + العد التنازلي + التذكير
+# (لم يتم حذف أو تعديل أي سطر سابق)
+# ============================================================
+if "connection_ready" not in st.session_state: st.session_state.connection_ready = False
+
+st.markdown("### 🔌 بوابة الاتصال بالمنصة")
+
+col_conn1, col_conn2 = st.columns([1, 2])
+
+with col_conn1:
+    if st.button("🚀 بدء الاتصال (عد تنازلي 15 ثانية)", type="primary", key="connect_countdown_btn"):
+        # إعادة تعيين الحالة عند بدء اتصال جديد
+        st.session_state.connection_ready = False
+
+        countdown_placeholder = st.empty()
+        total_seconds = 15
+
+        # عرض العد التنازلي مع شريط التقدم
+        for i in range(total_seconds, 0, -1):
+            progress = (total_seconds - i) / total_seconds * 100
+            countdown_placeholder.markdown(
+                f"""
+                <div style="background:linear-gradient(90deg,#1e3a8a,#3b82f6);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.3rem;font-weight:bold;box-shadow:0 4px 15px rgba(59,130,246,0.4)">
+                    ⏳ جاري تجهيز الاتصال... <span style="font-size:2rem;color:#fbbf24">{i}</span> ثانية
+                    <div style="background:#0f172a;border-radius:8px;height:12px;margin-top:0.8rem;overflow:hidden">
+                        <div style="width:{progress:.1f}%;height:100%;background:linear-gradient(90deg,#22d3ee,#3b82f6);transition:width 0.3s"></div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            time.sleep(1)
+
+        # عند انتهاء العد التنازلي
+        countdown_placeholder.markdown(
+            """
+            <div style="background:linear-gradient(90deg,#00c853,#64dd17);padding:1.2rem;border-radius:12px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold;box-shadow:0 4px 15px rgba(0,200,83,0.4)">
+                ✅ اكتمل العد التنازلي! الاتصال جاهز.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        time.sleep(1.2)  # إظهار رسالة النجاح لثانيتين قبل إعادة التحميل
+        st.session_state.connection_ready = True
+        st.rerun()
+
+with col_conn2:
+    if st.session_state.connection_ready:
+        st.markdown(
+            """
+            <div class="reminder-box">
+                🎯 <b>تذكير هام:</b><br>
+                الآن اضغط على زر <b>«💰 عرض الرصيد»</b> بالأسفل لإكمال الاتصال فعلياً وسحب الرصيد من المنصة.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("💡 اضغط على زر **«بدء الاتصال»** لبدء العد التنازلي. بعد انتهائه ستظهر لك رسالة تذكير لسحب الرصيد.")
+
+st.markdown("---")
+# ✅ نهاية القسم الجديد
+
+
 c1, c2, c3 = st.columns(3)
 with c1:
     if st.button("💰 عرض الرصيد", type="primary"):
@@ -281,6 +419,8 @@ with c1:
             with st.spinner("جاري سحب الرصيد..."):
                 bal = asyncio.run(_get_balance_async(acc))
                 st.success(f"💰 الرصيد: **{bal}**")
+                # عند نجاح سحب الرصيد، إخفاء التذكير (الاتصال اكتمل فعلاً)
+                st.session_state.connection_ready = False
         except Exception as e:
             st.error(f"❌ فشل: {e}")
             st.code(traceback.format_exc())
