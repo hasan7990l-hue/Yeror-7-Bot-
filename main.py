@@ -3,27 +3,24 @@
 
 """
 تطبيق ويب Streamlit لإشارات OTC
-- نظام تسجيل دخول / تسجيل حساب
-- قاعدة بيانات SQLite محلية
-- لا يحتاج Telegram / Flask
+- تسجيل دخول بالإيميل/كلمة المرور
+- كل حساب مرتبط بـ SESSION/UID خاص به
+- اتصال تلقائي بعد الدخول
 """
 
 import os
 import sys
 import json
 import time
-import sqlite3
 import hashlib
-import secrets
 import traceback
 import asyncio
-import threading
 import concurrent.futures
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 # ============================================================
-# 🔧 ترقيع asyncio BEFORE أي استيراد آخر
+# 🔧 ترقيع asyncio
 # ============================================================
 try:
     _original_get_event_loop = asyncio.get_event_loop
@@ -72,7 +69,6 @@ for _sub in ["history", "history/data", "logs", "cache", "data"]:
     except Exception:
         pass
 
-# --- ترقيع آمن لـ os.makedirs ---
 _original_makedirs = os.makedirs
 def _safe_makedirs(name, mode=0o777, exist_ok=False):
     try:
@@ -85,7 +81,6 @@ def _safe_makedirs(name, mode=0o777, exist_ok=False):
             return None
 os.makedirs = _safe_makedirs
 
-# --- تحديد نوع المكتبة ---
 LIB_TYPE = "none"
 PocketOption = None
 try:
@@ -103,141 +98,43 @@ try:
 except Exception:
     pass
 
+
 # ============================================================
-# 🗄️ قاعدة البيانات
+# 👥 جدول المستخدمين — عدّل هنا لإضافة حساباتك
 # ============================================================
-DB_PATH = os.path.join(TMP_DIR, "users.db")
+# كل مستخدم: email → {password, session, uid, is_demo, platform}
+#
+# ⚠️ ملاحظة أمنية: كلمة المرور مكتوبة هنا كنص صريح لأن الكود خاص بك.
+#    إذا أردت زيادة الأمان، استخدم دالة hash بسيطة أدناه.
+USERS: Dict[str, Dict] = {
+    "b1b2b3h45h@gmail.com": {
+        "password": "ضع_كلمة_المرور_هنا",
+        "session": '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]',
+        "uid": 27658142,
+        "is_demo": 1,
+        "platform": 2,
+    },
+    # ======== إضافة مستخدم آخر (اختياري) ========
+    # "user2@example.com": {
+    #     "password": "another_password",
+    #     "session": '42["auth",{"session":"xxxxx","isDemo":1,"uid":12345678,"platform":2}]',
+    #     "uid": 12345678,
+    #     "is_demo": 1,
+    #     "platform": 2,
+    # },
+}
 
-
-def _db_connect():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = _db_connect()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            session_key TEXT,
-            uid INTEGER,
-            is_demo INTEGER DEFAULT 1,
-            platform INTEGER DEFAULT 2,
-            created_at TEXT NOT NULL,
-            last_login TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def hash_password(password: str, salt: str = None) -> Tuple[str, str]:
-    if salt is None:
-        salt = secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000)
-    return h.hex(), salt
-
-
-def register_user(email: str, password: str) -> Tuple[bool, str]:
-    email = email.strip().lower()
-    if not email or "@" not in email or "." not in email:
-        return False, "❌ البريد الإلكتروني غير صالح."
-    if len(password) < 6:
-        return False, "❌ كلمة المرور يجب أن تكون 6 أحرف على الأقل."
-    try:
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE email = ?", (email,))
-        if cur.fetchone():
-            conn.close()
-            return False, "⚠️ هذا البريد مسجّل مسبقاً. جرّب تسجيل الدخول."
-        pwd_hash, salt = hash_password(password)
-        cur.execute("""
-            INSERT INTO users (email, password_hash, salt, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (email, pwd_hash, salt, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-        return True, "✅ تم إنشاء الحساب بنجاح! يمكنك تسجيل الدخول الآن."
-    except Exception as e:
-        return False, f"❌ خطأ في التسجيل: {e}"
-
-
-def login_user(email: str, password: str) -> Tuple[bool, Optional[dict], str]:
-    email = email.strip().lower()
-    try:
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE email = ?", (email,))
-        row = cur.fetchone()
-        if not row:
-            conn.close()
-            return False, None, "❌ البريد أو كلمة المرور غير صحيحة."
-        pwd_hash, _ = hash_password(password, row["salt"])
-        if pwd_hash != row["password_hash"]:
-            conn.close()
-            return False, None, "❌ البريد أو كلمة المرور غير صحيحة."
-        cur.execute("UPDATE users SET last_login = ? WHERE id = ?",
-                    (datetime.now().isoformat(), row["id"]))
-        conn.commit()
-        user = dict(row)
-        conn.close()
-        return True, user, "✅ تم تسجيل الدخول."
-    except Exception as e:
-        return False, None, f"❌ خطأ في الدخول: {e}"
-
-
-def update_user_session(user_id: int, session_key: str, uid: int, is_demo: int, platform: int) -> bool:
-    try:
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE users
-            SET session_key = ?, uid = ?, is_demo = ?, platform = ?
-            WHERE id = ?
-        """, (session_key, uid, is_demo, platform, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-def load_user_session(user_id: int) -> Optional[dict]:
-    try:
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute("SELECT session_key, uid, is_demo, platform FROM users WHERE id = ?", (user_id,))
-        row = cur.fetchone()
-        conn.close()
-        if row and row["session_key"]:
-            return dict(row)
-        return None
-    except Exception:
-        return None
-
-
-init_db()
 
 # ============================================================
 # الإعدادات
 # ============================================================
-SESSION_DEFAULT = ''
-UID_DEFAULT = 0
-IS_DEMO_DEFAULT = 1
-PLATFORM_DEFAULT = 2
-
 FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC",
                  "NZDUSD-OTC", "EURGBP-OTC",
                  "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
 
+
 # ============================================================
-# دوال مساعدة (نفس المنطق السابق)
+# دوال مساعدة
 # ============================================================
 def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Dict:
     if not candles or len(candles) < long_period + 1:
@@ -246,7 +143,6 @@ def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Di
         closes = [c[4] for c in candles] if isinstance(candles[0], (list, tuple)) else [c.close for c in candles]
     except Exception:
         return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0, "reason": "صيغة شموع غير معروفة"}
-
     current_price = closes[-1]
     sma_short = sum(closes[-short_period:]) / short_period
     sma_long = sum(closes[-long_period:]) / long_period
@@ -254,7 +150,6 @@ def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Di
     prev_sma_long = sum(closes[-long_period-1:-1]) / long_period
     diff = abs((sma_short - sma_long) / sma_long) * 100 if sma_long > 0 else 0
     confidence = min(90, 50 + diff * 3)
-
     if prev_sma_short <= prev_sma_long and sma_short > sma_long:
         return {"signal": "CALL 🟢", "confidence": round(confidence, 1), "price": current_price, "reason": f"SMA({short_period}) تجاوز SMA({long_period})"}
     elif prev_sma_short >= prev_sma_long and sma_short < sma_long:
@@ -318,7 +213,7 @@ def get_balance_safe(client):
             future = executor.submit(_fetch)
             return future.result(timeout=15)
     except concurrent.futures.TimeoutError:
-        return "⏱️ انتهت المهلة أثناء سحب الرصيد (15 ثانية)."
+        return "⏱️ انتهت المهلة أثناء سحب الرصيد."
     except Exception as e:
         return f"خطأ: {e}"
 
@@ -336,22 +231,24 @@ def get_candles_safe(client, symbol, timeframe, limit=30):
             future = executor.submit(_fetch)
             return future.result(timeout=15)
     except concurrent.futures.TimeoutError:
-        print("⏱️ انتهت مهلة جلب الشموع (15 ثانية).")
         return []
-    except Exception as e:
-        print(f"خطأ في جلب الشموع: {e}")
+    except Exception:
         return []
+
+
+def verify_login(email: str, password: str) -> Optional[dict]:
+    """يتحقق من بيانات الدخول ويُرجع بيانات المستخدم أو None."""
+    email = email.strip().lower()
+    for stored_email, info in USERS.items():
+        if stored_email.lower() == email and info["password"] == password:
+            return {"email": stored_email, **info}
+    return None
 
 
 # ============================================================
 # إعدادات الصفحة
 # ============================================================
-st.set_page_config(
-    page_title="بوت إشارات OTC",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="بوت إشارات OTC", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -365,77 +262,76 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # ============================================================
-# 🔐 نظام الدخول / التسجيل
+# 🔐 شاشة تسجيل الدخول
 # ============================================================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "user" not in st.session_state:
     st.session_state.user = None
 
+
+def auto_connect():
+    """يتصل تلقائياً باستخدام مفاتيح المستخدم الحالي."""
+    if not st.session_state.user:
+        return
+    u = st.session_state.user
+    with st.spinner("🔌 جاري الاتصال التلقائي بالمنصة..."):
+        client, ok, err, trc = connect_pocket(u["session"], int(u["uid"]), int(u["is_demo"]), int(u["platform"]))
+        if ok:
+            st.session_state.client = client
+            st.session_state.connected = True
+            st.session_state.last_error = None
+            st.session_state.last_error_trace = None
+        else:
+            st.session_state.connected = False
+            st.session_state.last_error = err
+            st.session_state.last_error_trace = trc
+
+
 if not st.session_state.logged_in:
     st.markdown('<div class="main-title">📈 بوت إشارات OTC</div>', unsafe_allow_html=True)
     st.markdown("---")
 
-    tab_login, tab_register = st.tabs(["🔑 تسجيل الدخول", "📝 حساب جديد"])
+    st.markdown('<div class="auth-box">', unsafe_allow_html=True)
+    st.subheader("🔐 تسجيل الدخول")
+    login_email = st.text_input("📧 البريد الإلكتروني", key="login_email")
+    login_pass = st.text_input("🔒 كلمة المرور", type="password", key="login_pass")
 
-    with tab_login:
-        st.markdown('<div class="auth-box">', unsafe_allow_html=True)
-        st.subheader("تسجيل الدخول")
-        login_email = st.text_input("📧 البريد الإلكتروني", key="login_email")
-        login_pass = st.text_input("🔒 كلمة المرور", type="password", key="login_pass")
-        if st.button("دخول", type="primary", key="btn_login"):
-            if not login_email or not login_pass:
-                st.warning("⚠️ أدخل البريد وكلمة المرور.")
+    if st.button("دخول واتصال تلقائي", type="primary", key="btn_login"):
+        if not login_email or not login_pass:
+            st.warning("⚠️ أدخل البريد وكلمة المرور.")
+        else:
+            user_info = verify_login(login_email, login_pass)
+            if user_info:
+                st.session_state.logged_in = True
+                st.session_state.user = user_info
+                # تهيئة الحالة
+                st.session_state.client = None
+                st.session_state.connected = False
+                st.session_state.last_error = None
+                st.session_state.last_error_trace = None
+                st.session_state.last_signal = None
+                st.session_state.last_candles = None
+                st.success("✅ تم الدخول. جاري الاتصال بالمنصة...")
+                # اتصال تلقائي
+                auto_connect()
+                st.rerun()
             else:
-                ok, user, msg = login_user(login_email, login_pass)
-                if ok:
-                    st.session_state.logged_in = True
-                    st.session_state.user = user
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-        st.markdown('</div>', unsafe_allow_html=True)
+                st.error("❌ البريد أو كلمة المرور غير صحيحة.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    with tab_register:
-        st.markdown('<div class="auth-box">', unsafe_allow_html=True)
-        st.subheader("إنشاء حساب جديد")
-        reg_email = st.text_input("📧 البريد الإلكتروني", key="reg_email")
-        reg_pass = st.text_input("🔒 كلمة المرور (6 أحرف على الأقل)", type="password", key="reg_pass")
-        reg_pass2 = st.text_input("🔒 تأكيد كلمة المرور", type="password", key="reg_pass2")
-        if st.button("تسجيل", type="primary", key="btn_register"):
-            if not reg_email or not reg_pass or not reg_pass2:
-                st.warning("⚠️ املأ جميع الحقول.")
-            elif reg_pass != reg_pass2:
-                st.error("❌ كلمتا المرور غير متطابقتين.")
-            else:
-                ok, msg = register_user(reg_email, reg_pass)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-        st.markdown('</div>', unsafe_allow_html=True)
-
+    st.caption("💡 إذا نسيت كلمة المرور، عدّل قاموس `USERS` في الكود.")
     st.stop()
 
 
 # ============================================================
-# المستخدم مسجّل الدخول — تحميل جلسته المحفوظة
+# ✅ المستخدم مسجّل الدخول
 # ============================================================
 user = st.session_state.user
-saved = load_user_session(user["id"])
 
-if "session_input" not in st.session_state:
-    st.session_state.session_input = (saved["session_key"] if saved else "") or SESSION_DEFAULT
-if "uid_input" not in st.session_state:
-    st.session_state.uid_input = int((saved["uid"] if saved else UID_DEFAULT) or UID_DEFAULT)
-if "is_demo_input" not in st.session_state:
-    st.session_state.is_demo_input = int((saved["is_demo"] if saved else IS_DEMO_DEFAULT) or IS_DEMO_DEFAULT)
-if "platform_input" not in st.session_state:
-    st.session_state.platform_input = int((saved["platform"] if saved else PLATFORM_DEFAULT) or PLATFORM_DEFAULT)
-
-# --- باقي State ---
+# تهيئة الحالة إذا لم تكن موجودة
 if "client" not in st.session_state:
     st.session_state.client = None
 if "connected" not in st.session_state:
@@ -454,53 +350,21 @@ if "last_candles" not in st.session_state:
 # Sidebar
 # ============================================================
 with st.sidebar:
-    # شريط المستخدم
     st.markdown(f'<div class="user-badge">👤 {user["email"]}</div>', unsafe_allow_html=True)
-    if st.button("🚪 تسجيل الخروج"):
-        st.session_state.logged_in = False
-        st.session_state.user = None
-        st.session_state.client = None
-        st.session_state.connected = False
-        st.rerun()
+    st.caption(f"🆔 UID: `{user['uid']}` | {'تجريبي' if user['is_demo'] == 1 else 'حقيقي'}")
 
-    st.markdown("---")
-    st.header("⚙️ الإعدادات")
-
-    st.subheader("🔑 بيانات الاتصال")
-    session_input = st.text_area(
-        "SESSION",
-        value=st.session_state.session_input,
-        height=100,
-        help="الصق مفتاح الجلسة من Pocket Option"
-    )
-    uid_input = st.number_input("UID", value=st.session_state.uid_input, step=1)
-    is_demo_input = st.selectbox(
-        "نوع الحساب",
-        options=[1, 0],
-        format_func=lambda x: "تجريبي" if x == 1 else "حقيقي",
-        index=0 if st.session_state.is_demo_input == 1 else 1
-    )
-    platform_input = st.number_input("Platform", value=st.session_state.platform_input, step=1)
-
-    # زر حفظ المفتاح في حساب المستخدم
-    if st.button("💾 حفظ المفتاح في حسابي", type="primary"):
-        if not session_input.strip():
-            st.warning("⚠️ أدخل مفتاح SESSION أولاً.")
-        else:
-            ok = update_user_session(user["id"], session_input.strip(), int(uid_input), int(is_demo_input), int(platform_input))
-            if ok:
-                st.session_state.session_input = session_input.strip()
-                st.session_state.uid_input = int(uid_input)
-                st.session_state.is_demo_input = int(is_demo_input)
-                st.session_state.platform_input = int(platform_input)
-                # تحديث نسخة الجلسة في user
-                st.session_state.user["session_key"] = session_input.strip()
-                st.session_state.user["uid"] = int(uid_input)
-                st.session_state.user["is_demo"] = int(is_demo_input)
-                st.session_state.user["platform"] = int(platform_input)
-                st.success("✅ تم ربط المفتاح بحسابك.")
-            else:
-                st.error("❌ فشل الحفظ.")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔌 إعادة اتصال"):
+            auto_connect()
+            st.rerun()
+    with col_b:
+        if st.button("🚪 خروج"):
+            st.session_state.logged_in = False
+            st.session_state.user = None
+            st.session_state.client = None
+            st.session_state.connected = False
+            st.rerun()
 
     st.markdown("---")
     st.subheader("📊 اختيار السوق")
@@ -515,34 +379,32 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption(f"🔌 نوع المكتبة: **{LIB_TYPE}**")
-    st.caption(f"👤 المستخدم: `{user['email']}`")
+
+    # معلومات المفاتيح (مخفية جزئياً)
+    with st.expander("🔑 المفاتيح المرتبطة بحسابك"):
+        sess_short = user["session"][:60] + "..." if len(user["session"]) > 60 else user["session"]
+        st.code(sess_short, language="text")
+        st.text(f"UID: {user['uid']}")
 
 
 # ============================================================
 # الواجهة الرئيسية
 # ============================================================
 st.markdown('<div class="main-title">📈 بوت إشارات OTC — نسخة الويب</div>', unsafe_allow_html=True)
+st.markdown(f"### مرحباً، `{user['email']}` 👋")
+
+# محاولة اتصال تلقائي عند أول دخول
+if not st.session_state.connected and not st.session_state.last_error:
+    auto_connect()
+
 st.markdown("---")
 
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     if st.button("🔌 اتصال بالمنصة", type="primary"):
-        with st.spinner("جاري الاتصال..."):
-            client, ok, err, trc = connect_pocket(
-                session_input, int(uid_input), int(is_demo_input), int(platform_input)
-            )
-            if ok:
-                st.session_state.client = client
-                st.session_state.connected = True
-                st.session_state.last_error = None
-                st.session_state.last_error_trace = None
-                st.success("✅ تم الاتصال بالمنصة بنجاح!")
-            else:
-                st.session_state.connected = False
-                st.session_state.last_error = err
-                st.session_state.last_error_trace = trc
-                st.error(f"❌ فشل الاتصال: {err}")
+        auto_connect()
+        st.rerun()
 
 with col2:
     if st.button("💰 عرض الرصيد"):
@@ -564,7 +426,7 @@ with col3:
             with st.spinner("جاري تحليل السوق..."):
                 candles = get_candles_safe(st.session_state.client, symbol_input, int(timeframe_input), 30)
                 if not candles:
-                    st.error("❌ لا توجد بيانات (ربما انتهت المهلة أو العملة غير مدعومة).")
+                    st.error("❌ لا توجد بيانات.")
                 else:
                     st.session_state.last_signal = generate_signal(candles)
                     st.session_state.last_candles = candles
@@ -580,7 +442,7 @@ with col4:
                     st.session_state.last_candles = candles
                     st.session_state.last_signal = generate_signal(candles)
                 else:
-                    st.error("❌ لا توجد بيانات (ربما انتهت المهلة أو العملة غير مدعومة).")
+                    st.error("❌ لا توجد بيانات.")
 
 if st.session_state.last_error and not st.session_state.connected:
     with st.expander("🔍 تفاصيل الخطأ", expanded=False):
@@ -592,10 +454,7 @@ st.markdown("---")
 
 status_col1, status_col2, status_col3 = st.columns(3)
 with status_col1:
-    if st.session_state.connected:
-        st.success("🟢 متصل بالمنصة")
-    else:
-        st.error("🔴 غير متصل")
+    st.success("🟢 متصل بالمنصة") if st.session_state.connected else st.error("🔴 غير متصل")
 with status_col2:
     st.info(f"📊 العملة: **{symbol_input}**")
 with status_col3:
@@ -625,33 +484,23 @@ if st.session_state.last_candles:
         current_price = closes[-1]
         sma5 = sum(closes[-5:]) / 5
         sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else sum(closes) / len(closes)
-
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("السعر الحالي", f"{current_price:.5f}")
         m2.metric("SMA(5)", f"{sma5:.5f}")
         m3.metric("SMA(20)", f"{sma20:.5f}")
         m4.metric("عدد الشموع", len(candles))
-
         rows = []
         for c in candles[-10:]:
             try:
                 dt = datetime.fromtimestamp(c[0]).strftime("%H:%M:%S")
-                rows.append({
-                    "الوقت": dt,
-                    "فتح": f"{c[1]:.5f}",
-                    "أعلى": f"{c[2]:.5f}",
-                    "أدنى": f"{c[3]:.5f}",
-                    "إغلاق": f"{c[4]:.5f}",
-                })
+                rows.append({"الوقت": dt, "فتح": f"{c[1]:.5f}", "أعلى": f"{c[2]:.5f}",
+                             "أدنى": f"{c[3]:.5f}", "إغلاق": f"{c[4]:.5f}"})
             except Exception:
                 rows.append({"الوقت": str(c), "فتح": "", "أعلى": "", "أدنى": "", "إغلاق": ""})
-
         st.dataframe(rows, use_container_width=True)
-
         try:
             import pandas as pd
-            chart_data = pd.DataFrame({"الإغلاق": closes[-30:]})
-            st.line_chart(chart_data)
+            st.line_chart(pd.DataFrame({"الإغلاق": closes[-30:]}))
         except Exception:
             pass
     except Exception as e:
@@ -659,4 +508,4 @@ if st.session_state.last_candles:
 
 st.markdown("---")
 st.caption(f"🕒 آخر تحديث: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.caption("⚠️ هذا التطبيق لأغراض تعليمية فقط. التداول يحمل مخاطر.")
+st.caption("⚠️ لأغراض تعليمية فقط.")
