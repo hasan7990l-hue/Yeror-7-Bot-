@@ -100,24 +100,24 @@ except Exception:
 
 
 # ============================================================
-# 👥 جدول المستخدمين — عدّل هنا لإضافة حساباتك
+# 👥 جدول المستخدمين — كلمة المرور الحالية: 123456
 # ============================================================
-# كل مستخدم: email → {password, session, uid, is_demo, platform}
+# لتغيير كلمة المرور: عدّل قيمة "password" أدناه ثم Commit + Reboot
 #
-# ⚠️ ملاحظة أمنية: كلمة المرور مكتوبة هنا كنص صريح لأن الكود خاص بك.
-#    إذا أردت زيادة الأمان، استخدم دالة hash بسيطة أدناه.
+# لإضافة مستخدم جديد: انسخ القالب وفك التعليق
+# ============================================================
 USERS: Dict[str, Dict] = {
     "b1b2b3h45h@gmail.com": {
-        "password": "ضع_كلمة_المرور_هنا",
+        "password": "123456",
         "session": '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]',
         "uid": 27658142,
         "is_demo": 1,
         "platform": 2,
     },
-    # ======== إضافة مستخدم آخر (اختياري) ========
+    # ======== قالب لإضافة مستخدم آخر (اختياري) ========
     # "user2@example.com": {
-    #     "password": "another_password",
-    #     "session": '42["auth",{"session":"xxxxx","isDemo":1,"uid":12345678,"platform":2}]',
+    #     "password": "كلمة_المرور_هنا",
+    #     "session": '42["auth",{"session":"SESSION_HERE","isDemo":1,"uid":UID_HERE,"platform":2}]',
     #     "uid": 12345678,
     #     "is_demo": 1,
     #     "platform": 2,
@@ -322,7 +322,7 @@ if not st.session_state.logged_in:
                 st.error("❌ البريد أو كلمة المرور غير صحيحة.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.caption("💡 إذا نسيت كلمة المرور، عدّل قاموس `USERS` في الكود.")
+    st.caption("💡 كلمة المرور الحالية: `123456` (يمكن تغييرها من قاموس USERS في الكود).")
     st.stop()
 
 
