@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import json
+"""
+تطبيق ويب Streamlit لإشارات OTC
+- لا يحتاج Telegram
+- لا يحتاج Flask
+- يعمل مباشرة على Streamlit Cloud
+"""
+
 import os
 import sys
+import json
 import time
-import threading
 import traceback
 from datetime import datetime
 from typing import Dict, List
 
-import asyncio
+import streamlit as st
 
-# --- معالجة صلاحيات الكتابة لمنصة Streamlit Cloud ---
+# --- معالجة صلاحيات الكتابة ---
 TMP_DIR = "/tmp/pocket_data"
 os.makedirs(TMP_DIR, exist_ok=True)
 os.environ["HOME"] = TMP_DIR
 os.environ["TMPDIR"] = TMP_DIR
 os.environ.setdefault("POCKETOPTION_HISTORY_PATH", TMP_DIR)
 
-# ========== الإضافة الجديدة #1: حل مشكلة global_value.py (os.makedirs) ==========
+# --- حل مشكلة global_value.py ---
 try:
     os.chdir(TMP_DIR)
-except Exception as _chdir_err:
-    print(f"Warning: could not chdir to {TMP_DIR}: {_chdir_err}")
+except Exception:
+    pass
 
 for _sub in ["history", "history/data", "logs", "cache", "data"]:
     try:
@@ -31,60 +37,7 @@ for _sub in ["history", "history/data", "logs", "cache", "data"]:
     except Exception:
         pass
 
-try:
-    _site_pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for _sub in ["history", "logs"]:
-        try:
-            os.makedirs(os.path.join(_site_pkg, _sub), exist_ok=True)
-        except Exception:
-            pass
-except Exception:
-    pass
-
-os.environ.setdefault("POCKETOPTION_DATA_DIR", TMP_DIR)
-os.environ.setdefault("POCKETOPTION_LOGS_DIR", os.path.join(TMP_DIR, "logs"))
-os.environ.setdefault("POCKETOPTION_CACHE_DIR", os.path.join(TMP_DIR, "cache"))
-# ========== نهاية الإضافة #1 ==========
-
-# ========== التعديل الجذري: سيرفر الصحة الآن في عملية منفصلة (multiprocessing) ==========
-# هذا يمنع Flask من حجب البوت داخل Streamlit.
-def _health_worker(port: int):
-    """يعمل في عملية منفصلة تماماً — لا يحجب البوت."""
-    try:
-        from flask import Flask
-        _app = Flask("health")
-
-        @_app.route("/")
-        def _hc():
-            return "Bot is alive and running!", 200
-
-        _app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-    except Exception as _e:
-        print(f"[Health Worker] error: {_e}")
-
-
-def run_health_server():
-    """تشغيل سيرفر الصحة في عملية منفصلة. إذا فشل، يكمل البوت عمله."""
-    port = int(os.environ.get("PORT", 8080))
-    try:
-        import multiprocessing
-        # استخدام spawn لتفادي مشاكل fork مع asyncio/telegram
-        try:
-            ctx = multiprocessing.get_context("spawn")
-        except Exception:
-            ctx = multiprocessing
-        p = ctx.Process(target=_health_worker, args=(port,), daemon=True)
-        p.start()
-        print(f"ℹ️ Health server started in separate process (PID: {p.pid}) on port {port}")
-    except Exception as e:
-        # في حال فشل multiprocessing، نكتفي بتعطيل سيرفر الصحة بدل تعطيل البوت
-        print(f"⚠️ Could not start health server (continuing without it): {e}")
-# ========== نهاية التعديل الجذري ==========
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-
-# ========== الإضافة الجديدة #2: ترقيع آمن قبل استيراد المكتبة ==========
+# --- ترقيع آمن لـ os.makedirs ---
 _original_makedirs = os.makedirs
 def _safe_makedirs(name, mode=0o777, exist_ok=False):
     try:
@@ -96,10 +49,10 @@ def _safe_makedirs(name, mode=0o777, exist_ok=False):
         except Exception:
             return None
 os.makedirs = _safe_makedirs
-# ========== نهاية الإضافة #2 ==========
 
 # --- تحديد نوع المكتبة ---
 LIB_TYPE = "none"
+PocketOption = None
 try:
     from pocketoptionapi2.stable_api import PocketOption
     LIB_TYPE = "pocketoptionapi2"
@@ -108,71 +61,35 @@ except Exception:
         from pocketoptionapi.stable_api import PocketOption
         LIB_TYPE = "pocketoptionapi"
     except Exception:
-        try:
-            from pocket_option import PocketOptionClient, AuthorizationData
-            LIB_TYPE = "pocket_option"
-        except Exception:
-            LIB_TYPE = "none"
+        LIB_TYPE = "none"
 
-# ========== الإضافة الجديدة #3: إعادة os.makedirs الأصلي ==========
+# --- إعادة os.makedirs الأصلي ---
 try:
     os.makedirs = _original_makedirs
 except Exception:
     pass
-# ========== نهاية الإضافة #3 ==========
 
-CONFIG_FILE = os.path.join(TMP_DIR, "signal_config.json")
-CREDENTIALS_FILE = os.path.join(TMP_DIR, "pocket_credentials.json")
+# ============================================================
+# الإعدادات
+# ============================================================
+SESSION_DEFAULT = '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]'
+UID_DEFAULT = 27658142
+IS_DEMO_DEFAULT = 1
+PLATFORM_DEFAULT = 2
 
-# --- المفتاح الجديد (مضمن) ---
-SESSION = '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]'
-SESSION = os.environ.get("POCKET_SESSION", SESSION)
-UID = 27658142
-UID = int(os.environ.get("POCKET_UID", UID))
-IS_DEMO = 1
-PLATFORM = 2
+FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC", "NZDUSD-OTC", "EURGBP-OTC"]
 
-BOT_TOKEN = "8604552604:AAGc6DOu4EMl9n-6uyc1IV8ZD9yz02KyBQU"
-BOT_TOKEN = os.environ.get("BOT_TOKEN", BOT_TOKEN)
-
-FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC"]
-TRADE_DURATIONS = [60, 120, 300]
-
-DEFAULT_CONFIG = {
-    "publish_channel": None,
-    "interval": 60,
-    "min_confidence": 60,
-    "enabled": False,
-    "selected_symbol": "EURUSD-OTC",
-    "selected_timeframe": 60,
-    "selected_duration": 60
-}
-
-def load_config() -> Dict:
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(DEFAULT_CONFIG, f, indent=2)
-    except Exception:
-        pass
-    return DEFAULT_CONFIG
-
-def save_config(config: Dict):
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=2)
-    except Exception:
-        pass
-
+# ============================================================
+# دوال مساعدة
+# ============================================================
 def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Dict:
     if not candles or len(candles) < long_period + 1:
         return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0, "reason": "بيانات غير كافية"}
-    closes = [c[4] for c in candles] if isinstance(candles[0], list) else [c.close for c in candles]
+    try:
+        closes = [c[4] for c in candles] if isinstance(candles[0], (list, tuple)) else [c.close for c in candles]
+    except Exception:
+        return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0, "reason": "صيغة شموع غير معروفة"}
+
     current_price = closes[-1]
     sma_short = sum(closes[-short_period:]) / short_period
     sma_long = sum(closes[-long_period:]) / long_period
@@ -187,335 +104,287 @@ def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Di
         return {"signal": "PUT 🔴", "confidence": round(confidence, 1), "price": current_price, "reason": f"SMA({short_period}) نزل تحت SMA({long_period})"}
     return {"signal": "NEUTRAL ⚪", "confidence": 50.0, "price": current_price, "reason": "لا يوجد تقاطع واضح"}
 
-class SignalPublisher:
-    def __init__(self):
-        self.config = load_config()
-        self.client = None
-        self.connected = False
-        self.selected_symbol = self.config.get("selected_symbol", "EURUSD-OTC")
-        self.selected_timeframe = self.config.get("selected_timeframe", 60)
-        self.selected_duration = self.config.get("selected_duration", 60)
-        self.last_error = None
-        self.last_error_trace = None
 
-    def connect(self) -> bool:
-        self.last_error = None
-        self.last_error_trace = None
-        self.connected = False
+def connect_pocket(session: str, uid: int, is_demo: int, platform: int):
+    """يُرجع (client, connected, error_msg, error_trace)"""
+    if LIB_TYPE == "none":
+        return None, False, "لم يتم العثور على أي مكتبة PocketOption مثبتة.", "LIB_TYPE = none"
 
-        if LIB_TYPE == "none":
-            self.last_error = "لم يتم العثور على أي مكتبة PocketOption مثبتة. تأكد من تثبيت pocketoptionapi2 أو pocketoptionapi."
-            self.last_error_trace = "LIB_TYPE = none"
-            return False
+    try:
+        if LIB_TYPE == "pocketoptionapi":
+            client = PocketOption(ssid=session, demo=bool(is_demo))
+            client.connect()
+            return client, True, None, None
 
-        try:
-            if LIB_TYPE == "pocketoptionapi":
-                self.client = PocketOption(ssid=SESSION, demo=True)
-                self.client.connect()
-                self.connected = True
-                return True
+        elif LIB_TYPE == "pocketoptionapi2":
+            client = PocketOption(demo=bool(is_demo))
+            try:
+                client.connect(session=session, uid=uid, isDemo=is_demo, platform=platform)
+            except TypeError:
+                client.set_session(session, uid, is_demo, platform)
+                client.connect()
+            return client, True, None, None
 
-            elif LIB_TYPE == "pocketoptionapi2":
-                self.client = PocketOption(demo=True)
-                self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
-                self.connected = True
-                return True
+        else:
+            client = PocketOption(demo=bool(is_demo))
+            try:
+                client.set_session(session, uid, is_demo, platform)
+                client.connect()
+            except Exception:
+                client.connect(session=session, uid=uid, isDemo=is_demo, platform=platform)
+            return client, True, None, None
 
-            else:
-                self.client = PocketOption(demo=True)
-                try:
-                    self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
-                    self.client.connect()
-                    self.connected = True
-                    return True
-                except Exception:
-                    self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
-                    self.connected = True
-                    return True
+    except Exception as e:
+        return None, False, f"فشل الاتصال: {str(e)}", traceback.format_exc()
 
-        except Exception as e:
-            self.last_error = f"فشل الاتصال: {str(e)}"
-            self.last_error_trace = traceback.format_exc()
-            self.connected = False
-            return False
 
-    def get_candles(self, symbol: str, timeframe: int = 60, limit: int = 30) -> List:
-        if not self.connected or not self.client:
-            return []
-        try:
-            return self.client.get_candles(symbol, timeframe, limit)
-        except Exception as e:
-            self.last_error = f"فشل جلب الشموع: {str(e)}"
-            self.last_error_trace = traceback.format_exc()
-            return []
+def get_balance_safe(client):
+    try:
+        if hasattr(client, "get_balance"):
+            return client.get_balance()
+        if hasattr(client, "GetBalance"):
+            return client.GetBalance()
+    except Exception as e:
+        return f"خطأ: {e}"
+    return 0.0
 
-    def get_balance(self) -> float:
-        if not self.connected or not self.client:
-            self.last_error = "محاولة سحب الرصيد بدون اتصال"
-            return 0.0
-        try:
-            return self.client.get_balance()
-        except Exception as e:
-            self.last_error = f"فشل سحب الرصيد: {str(e)}"
-            self.last_error_trace = traceback.format_exc()
-            return 0.0
 
-    def generate_signal_for_symbol(self, symbol: str, timeframe: int = 60) -> Dict:
-        if not self.connected:
-            self.last_error = "محاولة توليد إشارة بدون اتصال"
-            return {"signal": "NO_CONNECTION", "confidence": 0.0, "price": 0.0, "reason": "غير متصل"}
-        candles = self.get_candles(symbol, timeframe, 30)
-        if not candles:
-            return {"signal": "NO_DATA", "confidence": 0.0, "price": 0.0, "reason": "لا توجد بيانات"}
-        return generate_signal(candles)
+def get_candles_safe(client, symbol, timeframe, limit=30):
+    try:
+        if hasattr(client, "get_candles"):
+            return client.get_candles(symbol, timeframe, limit)
+        if hasattr(client, "GetCandles"):
+            return client.GetCandles(symbol, timeframe, limit)
+    except Exception:
+        return []
+    return []
 
-    def format_single_signal_message(self, symbol: str, signal: Dict, timeframe: int, duration: int) -> str:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        tf_str = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}.get(timeframe, f"{timeframe}s")
-        emoji = "🟢" if "CALL" in signal["signal"] else "🔴" if "PUT" in signal["signal"] else "⚪"
-        return (
-            f"📈 <b>إشارة {symbol}</b>\n"
-            f"🕒 {now}\n"
-            f"📊 الفريم: {tf_str}\n"
-            f"⏱️ مدة الصفقة: {duration} ثانية\n\n"
-            f"{emoji} <b>{signal['signal']}</b>\n"
-            f"🎯 الثقة: {signal['confidence']}%\n"
-            f"💵 السعر: {signal['price']:.4f}\n"
-            f"📝 {signal['reason']}"
-        )
 
-    async def async_connect(self):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.connect)
+# ============================================================
+# واجهة Streamlit
+# ============================================================
+st.set_page_config(
+    page_title="بوت إشارات OTC",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-    async def async_get_balance(self):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.get_balance)
+st.markdown("""
+<style>
+    .main-title { font-size: 2.2rem; font-weight: bold; color: #00d4ff; text-align: center; }
+    .stButton>button { width: 100%; height: 3rem; font-size: 1rem; font-weight: bold; border-radius: 10px; }
+    .signal-call { background: linear-gradient(90deg,#00c853,#64dd17); padding: 1rem; border-radius: 10px; color: white; text-align: center; font-size: 1.4rem; font-weight: bold; }
+    .signal-put { background: linear-gradient(90deg,#d50000,#ff1744); padding: 1rem; border-radius: 10px; color: white; text-align: center; font-size: 1.4rem; font-weight: bold; }
+    .signal-neutral { background: linear-gradient(90deg,#616161,#9e9e9e); padding: 1rem; border-radius: 10px; color: white; text-align: center; font-size: 1.4rem; font-weight: bold; }
+    .info-box { background: #1e1e1e; padding: 1rem; border-radius: 10px; border-left: 4px solid #00d4ff; }
+</style>
+""", unsafe_allow_html=True)
 
-    async def async_generate_signal(self, symbol, timeframe):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.generate_signal_for_symbol, symbol, timeframe)
+st.markdown('<div class="main-title">📈 بوت إشارات OTC — نسخة الويب</div>', unsafe_allow_html=True)
+st.markdown("---")
 
-publisher = SignalPublisher()
+# --- Sidebar ---
+with st.sidebar:
+    st.header("⚙️ الإعدادات")
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = publisher.selected_symbol
-    timeframe = publisher.selected_timeframe
-    duration = publisher.selected_duration
-    tf_str = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}.get(timeframe, f"{timeframe}s")
+    st.subheader("🔑 بيانات الاتصال")
+    session_input = st.text_area(
+        "SESSION",
+        value=os.environ.get("POCKET_SESSION", SESSION_DEFAULT),
+        height=100,
+        help="الصق مفتاح الجلسة من Pocket Option"
+    )
+    uid_input = st.number_input(
+        "UID",
+        value=int(os.environ.get("POCKET_UID", UID_DEFAULT)),
+        step=1
+    )
+    is_demo_input = st.selectbox(
+        "نوع الحساب",
+        options=[1, 0],
+        format_func=lambda x: "تجريبي" if x == 1 else "حقيقي",
+        index=0
+    )
+    platform_input = st.number_input("Platform", value=PLATFORM_DEFAULT, step=1)
 
-    keyboard = [
-        [InlineKeyboardButton("🔌 اتصال بالمنصة", callback_data="connect")],
-        [InlineKeyboardButton("💰 الرصيد", callback_data="balance")],
-        [InlineKeyboardButton("📊 اختيار العملة", callback_data="select_symbol")],
-        [InlineKeyboardButton(f"📈 إشارة فورية ({symbol})", callback_data="signal_now")],
-        [InlineKeyboardButton("📊 آخر بيانات السوق", callback_data="last_data")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = (
-        f"🤖 <b>بوت إشارات OTC</b>\n\n"
-        f"📊 العملة الحالية: <b>{symbol}</b>\n"
-        f"📈 فريم الشمعة: {tf_str}\n"
-        f"⏱️ مدة الصفقة: {duration} ثانية\n"
+    st.markdown("---")
+    st.subheader("📊 اختيار السوق")
+    symbol_input = st.selectbox("العملة", FOREX_SYMBOLS, index=0)
+    timeframe_input = st.selectbox(
+        "الفريم (ثانية)",
+        options=[60, 120, 300, 900],
+        format_func=lambda x: {60: "1m", 120: "2m", 300: "5m", 900: "15m"}[x],
+        index=0
+    )
+    duration_input = st.selectbox(
+        "مدة الصفقة (ثانية)",
+        options=[60, 120, 300],
+        index=0
     )
 
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    st.markdown("---")
+    st.caption(f"🔌 نوع المكتبة المكتشفة: **{LIB_TYPE}**")
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+# --- Session State ---
+if "client" not in st.session_state:
+    st.session_state.client = None
+if "connected" not in st.session_state:
+    st.session_state.connected = False
+if "last_error" not in st.session_state:
+    st.session_state.last_error = None
+if "last_error_trace" not in st.session_state:
+    st.session_state.last_error_trace = None
+if "last_signal" not in st.session_state:
+    st.session_state.last_signal = None
+if "last_candles" not in st.session_state:
+    st.session_state.last_candles = None
 
-    if data == "connect":
-        try:
-            success = publisher.connect()
-            if success:
-                await query.edit_message_text("✅ تم الاتصال (بالطريقة القديمة)!")
-                return
-        except Exception as e_old:
-            print(f"[الأصل] فشل الاتصال القديم: {e_old}")
-            publisher.last_error = f"فشل الاتصال القديم: {str(e_old)}"
-            publisher.last_error_trace = traceback.format_exc()
-        
-        success_patched = await publisher.async_connect()
-        if success_patched:
-            await query.edit_message_text("✅ تم الاتصال (بالمعالج الآمن)!")
+# --- أزرار التحكم ---
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    if st.button("🔌 اتصال بالمنصة", type="primary"):
+        with st.spinner("جاري الاتصال..."):
+            client, ok, err, trc = connect_pocket(
+                session_input, int(uid_input), int(is_demo_input), int(platform_input)
+            )
+            if ok:
+                st.session_state.client = client
+                st.session_state.connected = True
+                st.session_state.last_error = None
+                st.session_state.last_error_trace = None
+                st.success("✅ تم الاتصال بالمنصة بنجاح!")
+            else:
+                st.session_state.connected = False
+                st.session_state.last_error = err
+                st.session_state.last_error_trace = trc
+                st.error(f"❌ فشل الاتصال: {err}")
+
+with col2:
+    if st.button("💰 عرض الرصيد"):
+        if not st.session_state.connected or st.session_state.client is None:
+            st.warning("⚠️ يجب الاتصال أولاً.")
         else:
-            error_msg = publisher.last_error or "سبب غير معروف"
-            error_trace = publisher.last_error_trace or "لا يوجد تتبع"
-            if len(error_trace) > 500:
-                error_trace = error_trace[:500] + "...\n(تم اختصار التتبع)"
-            
-            full_error_report = (
-                f"❌ <b>فشل الاتصال بالمنصة</b>\n\n"
-                f"🔍 <b>تفاصيل الخطأ:</b>\n"
-                f"<code>{error_msg}</code>\n\n"
-                f"📋 <b>تتبع المكدس (Stack Trace):</b>\n"
-                f"<code>{error_trace}</code>\n\n"
-                f"🛠️ <b>الفحص الذاتي:</b>\n"
-                f"- مفتاح SESSION المستخدم: {'موجود' if SESSION else '⚠️ فارغ'}\n"
-                f"- نوع المكتبة: {LIB_TYPE}\n"
-                f"- UID: {UID}\n"
-                f"- الحساب: {'تجريبي' if IS_DEMO == 1 else 'حقيقي'}\n"
-                f"- المنصة: {PLATFORM}"
-            )
-            await query.edit_message_text(full_error_report, parse_mode="HTML")
+            with st.spinner("جاري سحب الرصيد..."):
+                bal = get_balance_safe(st.session_state.client)
+                if isinstance(bal, str):
+                    st.error(bal)
+                else:
+                    st.success(f"💰 الرصيد: **{bal:.2f}$**")
 
-    elif data == "balance":
-        if not publisher.connected:
-            await publisher.async_connect()
-            if not publisher.connected:
-                error_msg = publisher.last_error or "البوت غير متصل ولا يوجد خطأ محدد"
-                await query.edit_message_text(f"⚠️ البوت غير متصل.\n\nالسبب المحتمل:\n<code>{error_msg}</code>", parse_mode="HTML")
-                return
-        try:
-            bal = publisher.get_balance()
-            await query.edit_message_text(f"💰 الرصيد (قديم): {bal:.2f}$")
-        except Exception as e_bal:
-            print(f"[الأصل] فشل سحب الرصيد: {e_bal}")
-            publisher.last_error = f"فشل سحب الرصيد (الأصل): {str(e_bal)}"
-            publisher.last_error_trace = traceback.format_exc()
-            bal_new = await publisher.async_get_balance()
-            if bal_new > 0:
-                await query.edit_message_text(f"💰 الرصيد (جديد/آمن): {bal_new:.2f}$")
-            else:
-                await query.edit_message_text(
-                    f"❌ فشل سحب الرصيد.\n\nتفاصيل الخطأ:\n<code>{publisher.last_error}</code>",
-                    parse_mode="HTML"
-                )
+with col3:
+    if st.button("📈 إشارة فورية"):
+        if not st.session_state.connected or st.session_state.client is None:
+            st.warning("⚠️ يجب الاتصال أولاً.")
+        else:
+            with st.spinner("جاري تحليل السوق..."):
+                candles = get_candles_safe(st.session_state.client, symbol_input, int(timeframe_input), 30)
+                if not candles:
+                    st.error("❌ لا توجد بيانات لعرضها.")
+                else:
+                    sig = generate_signal(candles)
+                    st.session_state.last_signal = sig
+                    st.session_state.last_candles = candles
 
-    elif data == "select_symbol":
-        keyboard = [[InlineKeyboardButton(sym, callback_data=f"set_symbol_{sym}")] for sym in FOREX_SYMBOLS]
-        await query.edit_message_text("📊 اختر العملة:", reply_markup=InlineKeyboardMarkup(keyboard))
+with col4:
+    if st.button("📊 آخر بيانات السوق"):
+        if not st.session_state.connected or st.session_state.client is None:
+            st.warning("⚠️ يجب الاتصال أولاً.")
+        else:
+            with st.spinner("جاري جلب البيانات..."):
+                candles = get_candles_safe(st.session_state.client, symbol_input, int(timeframe_input), 30)
+                if candles:
+                    st.session_state.last_candles = candles
+                    st.session_state.last_signal = generate_signal(candles)
+                else:
+                    st.error("❌ لا توجد بيانات.")
 
-    elif data.startswith("set_symbol_"):
-        symbol = data.replace("set_symbol_", "")
-        publisher.selected_symbol = symbol
-        publisher.config["selected_symbol"] = symbol
-        save_config(publisher.config)
-        await query.edit_message_text(f"✅ تم اختيار {symbol}. ارجع للقائمة الرئيسية عبر /start")
+# --- عرض الخطأ إن وجد ---
+if st.session_state.last_error and not st.session_state.connected:
+    with st.expander("🔍 تفاصيل الخطأ", expanded=False):
+        st.code(st.session_state.last_error, language="text")
+        if st.session_state.last_error_trace:
+            st.code(st.session_state.last_error_trace, language="python")
 
-    elif data == "signal_now":
-        if not publisher.connected:
-            await publisher.async_connect()
-            if not publisher.connected:
-                error_msg = publisher.last_error or "البوت غير متصل"
-                await query.edit_message_text(f"⚠️ البوت غير متصل.\n\nالسبب:\n<code>{error_msg}</code>", parse_mode="HTML")
-                return
-        try:
-            signal = publisher.generate_signal_for_symbol(publisher.selected_symbol, publisher.selected_timeframe)
-            msg = publisher.format_single_signal_message(publisher.selected_symbol, signal, publisher.selected_timeframe, publisher.selected_duration)
-            await query.edit_message_text(msg, parse_mode="HTML")
-        except Exception as e_sig:
-            print(f"[الأصل] فشل توليد الإشارة: {e_sig}")
-            publisher.last_error = f"فشل توليد الإشارة (الأصل): {str(e_sig)}"
-            publisher.last_error_trace = traceback.format_exc()
-            signal_new = await publisher.async_generate_signal(publisher.selected_symbol, publisher.selected_timeframe)
-            if signal_new and signal_new.get("signal") != "NO_CONNECTION":
-                msg_new = publisher.format_single_signal_message(publisher.selected_symbol, signal_new, publisher.selected_timeframe, publisher.selected_duration)
-                await query.edit_message_text(msg_new, parse_mode="HTML")
-            else:
-                await query.edit_message_text(
-                    f"❌ فشل توليد الإشارة.\n\nتفاصيل الخطأ:\n<code>{publisher.last_error}</code>",
-                    parse_mode="HTML"
-                )
+st.markdown("---")
 
-    elif data == "last_data":
-        if not publisher.connected:
-            await publisher.async_connect()
-        
-        candles = publisher.get_candles(publisher.selected_symbol, publisher.selected_timeframe, 30)
-        if not candles:
-            await query.edit_message_text(
-                f"❌ لا توجد بيانات لعرضها.\n"
-                f"🔹 الحالة: {'✅ متصل' if publisher.connected else '❌ غير متصل'}\n"
-                f"🔹 آخر خطأ: {publisher.last_error or 'لا يوجد'}"
-            )
-            return
+# --- حالة الاتصال ---
+status_col1, status_col2, status_col3 = st.columns(3)
+with status_col1:
+    if st.session_state.connected:
+        st.success("🟢 متصل بالمنصة")
+    else:
+        st.error("🔴 غير متصل")
+with status_col2:
+    st.info(f"📊 العملة: **{symbol_input}**")
+with status_col3:
+    tf_name = {60: "1m", 120: "2m", 300: "5m", 900: "15m"}.get(int(timeframe_input), f"{timeframe_input}s")
+    st.info(f"⏱️ الفريم: **{tf_name}** | المدة: **{duration_input}s**")
 
+st.markdown("---")
+
+# --- عرض الإشارة ---
+if st.session_state.last_signal:
+    sig = st.session_state.last_signal
+    st.subheader("📢 الإشارة الحالية")
+    if "CALL" in sig["signal"]:
+        st.markdown(f'<div class="signal-call">{sig["signal"]} — ثقة {sig["confidence"]}%</div>', unsafe_allow_html=True)
+    elif "PUT" in sig["signal"]:
+        st.markdown(f'<div class="signal-put">{sig["signal"]} — ثقة {sig["confidence"]}%</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="signal-neutral">{sig["signal"]} — ثقة {sig["confidence"]}%</div>', unsafe_allow_html=True)
+
+    st.markdown(f"**💵 السعر:** `{sig['price']:.5f}`")
+    st.markdown(f"**📝 السبب:** {sig['reason']}")
+
+# --- عرض الشموع ---
+if st.session_state.last_candles:
+    candles = st.session_state.last_candles
+    st.markdown("---")
+    st.subheader(f"📋 آخر 10 شموع — {symbol_input}")
+
+    try:
         closes = [c[4] for c in candles]
         current_price = closes[-1]
         sma5 = sum(closes[-5:]) / 5
-        sma20 = sum(closes[-20:]) / 20
-        signal = generate_signal(candles)
+        sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else sum(closes) / len(closes)
 
-        msg = f"📊 <b>بيانات السوق الحالية</b>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"🔹 الرمز: <b>{publisher.selected_symbol}</b>\n"
-        msg += f"🔹 الفريم: {publisher.selected_timeframe} ثانية\n"
-        msg += f"🔹 حالة الاتصال: {'✅ متصل' if publisher.connected else '❌ غير متصل'}\n"
-        msg += f"🔹 عدد الشموع المجلوبة: {len(candles)}\n"
-        msg += f"🔹 السعر الحالي (الإغلاق): <b>{current_price:.5f}</b>\n"
-        msg += f"🔹 المتوسط المتحرك SMA(5): {sma5:.5f}\n"
-        msg += f"🔹 المتوسط المتحرك SMA(20): {sma20:.5f}\n"
-        msg += f"🔹 الإشارة الحالية: <b>{signal['signal']}</b> (ثقة {signal['confidence']}%)\n"
-        msg += f"🔹 سبب الإشارة: {signal['reason']}\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"📋 <b>آخر 5 شموع (الخزانة):</b>\n"
-        
-        for idx, c in enumerate(candles[-5:], 1):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("السعر الحالي", f"{current_price:.5f}")
+        m2.metric("SMA(5)", f"{sma5:.5f}")
+        m3.metric("SMA(20)", f"{sma20:.5f}")
+        m4.metric("عدد الشموع", len(candles))
+
+        # جدول
+        rows = []
+        for c in candles[-10:]:
             try:
                 dt = datetime.fromtimestamp(c[0]).strftime("%H:%M:%S")
-                msg += (
-                    f"  {idx}⟩ {dt} | فتح: {c[1]:.5f} | أعلى: {c[2]:.5f} | "
-                    f"أدنى: {c[3]:.5f} | إغلاق: <b>{c[4]:.5f}</b>\n"
-                )
+                rows.append({
+                    "الوقت": dt,
+                    "فتح": f"{c[1]:.5f}",
+                    "أعلى": f"{c[2]:.5f}",
+                    "أدنى": f"{c[3]:.5f}",
+                    "إغلاق": f"{c[4]:.5f}",
+                })
             except Exception:
-                msg += f"  {idx}⟩ {c}\n"
-        
-        await query.edit_message_text(msg, parse_mode="HTML")
+                rows.append({"الوقت": str(c), "فتح": "", "أعلى": "", "أدنى": "", "إغلاق": ""})
 
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 جاري اختبار الاتصال بالمنصة...")
-    success = await publisher.async_connect()
-    if success:
-        await update.message.reply_text("✅ الاتصال ناجح! المنصة جاهزة.")
-    else:
-        error_msg = publisher.last_error or "سبب غير معروف"
-        error_trace = publisher.last_error_trace or "لا يوجد تتبع"
-        if len(error_trace) > 500:
-            error_trace = error_trace[:500] + "...\n(تم اختصار التتبع)"
-        full_report = (
-            f"❌ <b>فشل اختبار الاتصال</b>\n\n"
-            f"🔍 <b>التفاصيل:</b>\n"
-            f"<code>{error_msg}</code>\n\n"
-            f"📋 <b>التتبع:</b>\n"
-            f"<code>{error_trace}</code>\n\n"
-            f"🛠️ <b>المتغيرات:</b>\n"
-            f"- نوع المكتبة: {LIB_TYPE}\n"
-            f"- UID: {UID}\n"
-            f"- الحساب: {'تجريبي' if IS_DEMO == 1 else 'حقيقي'}"
-        )
-        await update.message.reply_text(full_report, parse_mode="HTML")
+        st.dataframe(rows, use_container_width=True)
 
-# ---- آلية القفل ----
-LOCK_FILE = "/tmp/bot.lock"
+        # رسم بياني
+        try:
+            import pandas as pd
+            chart_data = pd.DataFrame({"الإغلاق": closes[-30:]})
+            st.line_chart(chart_data)
+        except Exception:
+            pass
 
-def main():
-    if os.path.exists(LOCK_FILE):
-        print("⚠️ يوجد نسخة أخرى من البوت تعمل، إنهاء هذه النسخة.")
-        return
+    except Exception as e:
+        st.error(f"خطأ في عرض البيانات: {e}")
 
-    # تشغيل سيرفر الصحة في عملية منفصلة (لن يحجب البوت)
-    run_health_server()
-
-    with open(LOCK_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-    try:
-        app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CommandHandler("test", test_command))
-        app.add_handler(CallbackQueryHandler(button_handler))
-        print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة وأمر /test وتحديد مهلة 30 ثانية)")
-        print("🚀 جاهز لتشغيل run_polling...")
-        app.run_polling(stop_signals=None)
-    finally:
-        if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
-
-if __name__ == "__main__":
-    main()
+# --- Footer ---
+st.markdown("---")
+st.caption(f"🕒 آخر تحديث: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption("⚠️ هذا التطبيق لأغراض تعليمية فقط. التداول يحمل مخاطر.")
