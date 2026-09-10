@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Popup Analyzer</title>
+<style>
+body{margin:0;font-family:'Segoe UI',Tahoma,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);color:#e2e8f0;min-height:100vh;padding:1rem}
+h3{color:#22d3ee;margin:0 0 1rem;font-size:1.05rem}
+select,button{width:100%;padding:0.7rem;margin-bottom:0.7rem;border-radius:8px;font-size:0.9rem;background:rgba(30,41,59,0.9);border:1px solid rgba(34,211,238,0.3);color:#e2e8f0}
+button{background:linear-gradient(135deg,#7c3aed,#22d3ee);border:none;font-weight:800;cursor:pointer;color:#fff;padding:0.9rem}
+button:disabled{opacity:0.6}
+.result{margin-top:1rem;padding:1rem;border-radius:10px;text-align:center;font-weight:800;font-size:1.2rem;display:none}
+.result.show{display:block}
+.result.CALL{background:linear-gradient(135deg,#00c853,#64dd17)}
+.result.PUT{background:linear-gradient(135deg,#d50000,#ff1744)}
+.result.NEUTRAL{background:#616161}
+.result small{display:block;font-weight:500;margin-top:0.4rem;font-size:0.8rem;opacity:0.9}
+</style></head>
+<body>
+<h3>Popup Analyzer</h3>
+<select id="asset">{% for a in assets %}<option>{{ a }}</option>{% endfor %}</select>
+<select id="period">{% for p in periods %}<option>{{ p }}</option>{% endfor %}</select>
+<select id="session_type"><option value="demo">Demo</option><option value="real">Real</option></select>
+<button onclick="run(event)">Analyze</button>
+<div class="result" id="res"></div>
+<script>
+async function run(ev){
+  const btn=ev.target;btn.disabled=true;btn.textContent='Analyzing...';
+  try{
+    const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        asset:document.getElementById('asset').value,
+        period:parseInt(document.getElementById('period').value),
+        session_type:document.getElementById('session_type').value
+      })});
+    const d=await r.json();
+    const res=document.getElementById('res');
+    let cls='NEUTRAL';
+    if(d.signal&&d.signal.indexOf('CALL')>=0)cls='CALL';
+    else if(d.signal&&d.signal.indexOf('PUT')>=0)cls='PUT';
+    res.className='result show '+cls;
+    res.innerHTML=(d.signal||'ERROR')+'<small>'+(d.ok?(d.price+' | '+d.reason):d.error)+'</small>';
+  }catch(e){
+    const res=document.getElementById('res');
+    res.className='result show NEUTRAL';
+    res.textContent='Connection error';
+  }finally{
+    btn.disabled=false;btn.textContent='Analyze';
+  }
+}
+</script>
+</body></html>
