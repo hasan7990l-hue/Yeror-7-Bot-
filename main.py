@@ -15,12 +15,12 @@ import time
 import traceback
 import asyncio
 import threading
+import concurrent.futures
 from datetime import datetime
 from typing import Dict, List
 
 # ============================================================
 # 🔧 ترقيع asyncio BEFORE أي استيراد آخر
-# يضمن وجود event loop في خيط Streamlit
 # ============================================================
 try:
     _original_get_event_loop = asyncio.get_event_loop
@@ -40,7 +40,6 @@ try:
 except Exception:
     pass
 
-# ضمان وجود loop الآن أيضاً
 try:
     asyncio.get_event_loop()
 except Exception:
@@ -109,7 +108,8 @@ UID_DEFAULT = 27658142
 IS_DEMO_DEFAULT = 1
 PLATFORM_DEFAULT = 2
 
-FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC", "NZDUSD-OTC", "EURGBP-OTC"]
+FOREX_SYMBOLS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC", "NZDUSD-OTC", "EURGBP-OTC",
+                 "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
 
 # ============================================================
 # دوال مساعدة
@@ -138,7 +138,6 @@ def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Di
 
 
 def _ensure_event_loop():
-    """تأكيد وجود event loop في الخيط الحالي قبل أي عملية."""
     try:
         asyncio.get_event_loop()
     except RuntimeError:
@@ -154,12 +153,10 @@ def connect_pocket(session: str, uid: int, is_demo: int, platform: int):
     if LIB_TYPE == "none":
         return None, False, "لم يتم العثور على أي مكتبة PocketOption مثبتة.", "LIB_TYPE = none"
 
-    # 🔧 ضمان وجود event loop قبل إنشاء الكائن
     _ensure_event_loop()
 
     try:
         if LIB_TYPE == "pocketoptionapi":
-            # بعض الإصدارات تتطلب event loop جديد لكل اتصال
             _ensure_event_loop()
             client = PocketOption(ssid=session, demo=bool(is_demo))
             client.connect()
@@ -189,28 +186,49 @@ def connect_pocket(session: str, uid: int, is_demo: int, platform: int):
         return None, False, f"فشل الاتصال: {str(e)}", traceback.format_exc()
 
 
+# ============================================================
+# 🔧 الدوال المحمية بمهلة (Timeout) — منع تجميد الواجهة
+# ============================================================
 def get_balance_safe(client):
     _ensure_event_loop()
-    try:
+
+    def _fetch():
         if hasattr(client, "get_balance"):
             return client.get_balance()
         if hasattr(client, "GetBalance"):
             return client.GetBalance()
+        return 0.0
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            return future.result(timeout=15)
+    except concurrent.futures.TimeoutError:
+        return "⏱️ انتهت المهلة أثناء سحب الرصيد (15 ثانية)."
     except Exception as e:
         return f"خطأ: {e}"
-    return 0.0
 
 
 def get_candles_safe(client, symbol, timeframe, limit=30):
     _ensure_event_loop()
-    try:
+
+    def _fetch():
         if hasattr(client, "get_candles"):
             return client.get_candles(symbol, timeframe, limit)
         if hasattr(client, "GetCandles"):
             return client.GetCandles(symbol, timeframe, limit)
-    except Exception:
         return []
-    return []
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            return future.result(timeout=15)
+    except concurrent.futures.TimeoutError:
+        print("⏱️ انتهت مهلة جلب الشموع (15 ثانية).")
+        return []
+    except Exception as e:
+        print(f"خطأ في جلب الشموع: {e}")
+        return []
 
 
 # ============================================================
@@ -334,7 +352,7 @@ with col3:
             with st.spinner("جاري تحليل السوق..."):
                 candles = get_candles_safe(st.session_state.client, symbol_input, int(timeframe_input), 30)
                 if not candles:
-                    st.error("❌ لا توجد بيانات لعرضها.")
+                    st.error("❌ لا توجد بيانات لعرضها (ربما انتهت المهلة أو العملة غير مدعومة).")
                 else:
                     sig = generate_signal(candles)
                     st.session_state.last_signal = sig
@@ -351,7 +369,7 @@ with col4:
                     st.session_state.last_candles = candles
                     st.session_state.last_signal = generate_signal(candles)
                 else:
-                    st.error("❌ لا توجد بيانات.")
+                    st.error("❌ لا توجد بيانات (ربما انتهت المهلة أو العملة غير مدعومة).")
 
 # --- عرض الخطأ إن وجد ---
 if st.session_state.last_error and not st.session_state.connected:
