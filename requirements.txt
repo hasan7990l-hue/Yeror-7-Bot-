@@ -6,3 +6,6 @@ Flask>=3.0.3
 requests>=2.32.0
 websocket-client>=1.8.0
 urllib3>=2.2.0
+pocketoptionapi2 
+pocketoptionapi
+PocketOption
