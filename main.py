@@ -134,55 +134,53 @@ class SignalPublisher:
         self.last_error = None
         self.last_error_trace = None
 
+    # ========== التعديل الحصري هنا (دالة connect) ==========
     def connect(self) -> bool:
         self.last_error = None
         self.last_error_trace = None
+        self.connected = False
+
+        if LIB_TYPE == "none":
+            self.last_error = "لم يتم العثور على أي مكتبة PocketOption مثبتة. تأكد من تثبيت pocketoptionapi2 أو pocketoptionapi."
+            self.last_error_trace = "LIB_TYPE = none"
+            return False
 
         try:
-            if LIB_TYPE in ("pocketoptionapi2", "pocketoptionapi"):
-                # --- التصحيح الحاسم: إنشاء الكائن حسب نوع المكتبة ---
-                if LIB_TYPE == "pocketoptionapi":
-                    self.client = PocketOption(SESSION, demo=True)   # القديم يطلب ssid
-                else:
-                    self.client = PocketOption(demo=True)            # الجديد لا يطلب
+            # --- المحاولة الأولى: باستخدام التوقيع الشائع لمكتبة pocketoptionapi (القديمة) ---
+            if LIB_TYPE == "pocketoptionapi":
+                self.client = PocketOption(ssid=SESSION, demo=True)
+                self.client.connect()
+                self.connected = True
+                return True
 
+            # --- المحاولة الثانية: باستخدام pocketoptionapi2 (الجديدة) ---
+            elif LIB_TYPE == "pocketoptionapi2":
+                self.client = PocketOption(demo=True)
+                self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
+                self.connected = True
+                return True
+
+            # --- المحاولة الثالثة: طريقة set_session إذا فشلت السابقتان ---
+            else:
+                self.client = PocketOption(demo=True)
                 try:
+                    # بعض الإصدارات تحتاج إلى set_session أولاً
+                    self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
+                    self.client.connect()
+                    self.connected = True
+                    return True
+                except Exception:
+                    # محاولة بالتمرير المباشر
                     self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
                     self.connected = True
                     return True
-                except Exception as e1:
-                    self.last_error = f"طريقة 1 فشلت: {str(e1)}"
-                    self.last_error_trace = traceback.format_exc()
-                    try:
-                        self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
-                        self.client.connect()
-                        self.connected = True
-                        return True
-                    except Exception as e2:
-                        self.last_error = f"طريقة 2 فشلت: {str(e2)}"
-                        self.last_error_trace = traceback.format_exc()
-                        try:
-                            self.client.connect()
-                            self.connected = True
-                            return True
-                        except Exception as e3:
-                            self.last_error = f"طريقة 3 فشلت: {str(e3)}"
-                            self.last_error_trace = traceback.format_exc()
-                            try:
-                                self.client.connect()
-                                self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
-                                self.connected = True
-                                return True
-                            except Exception as e4:
-                                self.last_error = f"طريقة 4 فشلت: {str(e4)}"
-                                self.last_error_trace = traceback.format_exc()
-            elif LIB_TYPE == "pocket_option":
-                pass
+
         except Exception as e:
-            self.last_error = f"خطأ عام في connect: {str(e)}"
+            self.last_error = f"فشل الاتصال: {str(e)}"
             self.last_error_trace = traceback.format_exc()
-        self.connected = False
-        return False
+            self.connected = False
+            return False
+    # ========== نهاية التعديل ==========
 
     def get_candles(self, symbol: str, timeframe: int = 60, limit: int = 30) -> List:
         if not self.connected or not self.client:
@@ -420,6 +418,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode="HTML")
     # ✅ نهاية القسم الجديد
 
+# ========== الأمر الجديد المضافة (/test) بدون حذف أي شيء ==========
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔄 جاري اختبار الاتصال بالمنصة...")
+    success = await publisher.async_connect()
+    if success:
+        await update.message.reply_text("✅ الاتصال ناجح! المنصة جاهزة.")
+    else:
+        error_msg = publisher.last_error or "سبب غير معروف"
+        error_trace = publisher.last_error_trace or "لا يوجد تتبع"
+        if len(error_trace) > 500:
+            error_trace = error_trace[:500] + "...\n(تم اختصار التتبع)"
+        full_report = (
+            f"❌ <b>فشل اختبار الاتصال</b>\n\n"
+            f"🔍 <b>التفاصيل:</b>\n"
+            f"<code>{error_msg}</code>\n\n"
+            f"📋 <b>التتبع:</b>\n"
+            f"<code>{error_trace}</code>\n\n"
+            f"🛠️ <b>المتغيرات:</b>\n"
+            f"- نوع المكتبة: {LIB_TYPE}\n"
+            f"- UID: {UID}\n"
+            f"- الحساب: {'تجريبي' if IS_DEMO == 1 else 'حقيقي'}"
+        )
+        await update.message.reply_text(full_report, parse_mode="HTML")
+# ========== نهاية الإضافة ==========
+
 # ---- آلية القفل ----
 LOCK_FILE = "/tmp/bot.lock"
 
@@ -437,8 +460,11 @@ def main():
     try:
         app = Application.builder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start_command))
+        # ========== تسجيل الأمر الجديد /test ==========
+        app.add_handler(CommandHandler("test", test_command))
+        # ==============================================
         app.add_handler(CallbackQueryHandler(button_handler))
-        print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة)")
+        print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة وأمر /test)")
         app.run_polling(stop_signals=None)
     finally:
         if os.path.exists(LOCK_FILE):
