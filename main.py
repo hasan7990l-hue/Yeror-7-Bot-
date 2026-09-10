@@ -458,13 +458,15 @@ def main():
         f.write(str(os.getpid()))
 
     try:
-        app = Application.builder().token(BOT_TOKEN).build()
+        # ======== التعديل الوحيد (إضافة مهلة اتصال وقراءة 30 ثانية) ========
+        app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
+        # ===================================================================
         app.add_handler(CommandHandler("start", start_command))
         # ========== تسجيل الأمر الجديد /test ==========
         app.add_handler(CommandHandler("test", test_command))
         # ==============================================
         app.add_handler(CallbackQueryHandler(button_handler))
-        print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة وأمر /test)")
+        print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة وأمر /test وتحديد مهلة 30 ثانية)")
         app.run_polling(stop_signals=None)
     finally:
         if os.path.exists(LOCK_FILE):
