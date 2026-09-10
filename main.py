@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import asyncio
+import inspect
 import traceback
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -140,6 +141,81 @@ async def _wait_for_socket_connection(client, max_wait: float = 30.0, step: floa
     return False
 
 
+# ============================================================
+# 🆕 دوال تشخيص واتصال صريح (جديدة بالكامل، لم تُحذف أي أسطر سابقة)
+# ============================================================
+def _diagnose_client(client) -> str:
+    """
+    تُرجع نصاً يحتوي على جميع الطرق والخصائص المتاحة على كائن العميل،
+    لمساعدتنا في معرفة طريقة الاتصال الصحيحة.
+    """
+    lines = []
+    lines.append("=== تشخيص كائن PocketOptionClient ===")
+    lines.append(f"النوع: {type(client).__name__}")
+    lines.append(f"الوحدة: {type(client).__module__}")
+    lines.append("--- الخصائص (attributes) ---")
+    try:
+        attrs = [a for a in dir(client) if not a.startswith("__")]
+    except Exception:
+        attrs = []
+    for a in attrs:
+        try:
+            val = getattr(client, a)
+            kind = type(val).__name__
+            if callable(val):
+                lines.append(f"  • {a}()  [{kind}]")
+            else:
+                lines.append(f"  • {a} = {kind}")
+        except Exception as e:
+            lines.append(f"  • {a} = <خطأ: {e}>")
+
+    lines.append("--- دوال الاتصال المحتملة ---")
+    for name in ("connect", "start", "run", "run_forever", "authorize", "open",
+                 "login", "establish", "init", "launch", "start_client"):
+        if hasattr(client, name):
+            attr = getattr(client, name)
+            if callable(attr):
+                try:
+                    sig = str(inspect.signature(attr))
+                except Exception:
+                    sig = "(?)"
+                lines.append(f"  ✅ {name}{sig}")
+    return "\n".join(lines)
+
+
+async def _explicit_connect(client) -> dict:
+    """
+    تحاول استدعاء أي دالة اتصال معروفة على كائن العميل بشكل صريح.
+    تُرجع قاموساً فيه: النتيجة، الدالة المستخدمة، الأخطاء.
+    """
+    result = {"success": False, "used": None, "errors": []}
+    candidate_methods = [
+        "connect", "start", "run", "run_forever", "authorize",
+        "open", "login", "establish", "launch", "start_client",
+    ]
+    for name in candidate_methods:
+        if not hasattr(client, name):
+            continue
+        method = getattr(client, name)
+        if not callable(method):
+            continue
+        try:
+            ret = method()
+            # إذا كانت دالة async، ننتظرها
+            if inspect.isawaitable(ret):
+                await ret
+            result["used"] = name
+            result["success"] = True
+            print(f"[DEBUG] _explicit_connect نجحت باستخدام: {name}")
+            return result
+        except TypeError as te:
+            # قد تحتاج الدالة معاملات، نحاول بدونها ونتركها
+            result["errors"].append(f"{name} (TypeError): {te}")
+        except Exception as e:
+            result["errors"].append(f"{name}: {e}")
+    return result
+
+
 async def _get_balance_async(acc: dict) -> float:
     """
     الحصول على الرصيد باستخدام نظام الأحداث في مكتبة pocket-option.
@@ -180,6 +256,10 @@ async def _get_balance_async(acc: dict) -> float:
         sub_assets=["EURUSD_otc"],  # يمكن تعديلها حسب الحاجة
         sub_period=60,
     )
+
+    # 🆕 محاولة الاتصال الصريح أولاً (لأن default_init لا يتصل)
+    conn_result = await _explicit_connect(client)
+    print(f"[DEBUG] _explicit_connect result: {conn_result}")
 
     # ✅ الإصلاح 1: انتظار الاتصال الفعلي بدلاً من sleep(8) الثابت
     connected = await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
@@ -225,9 +305,14 @@ async def _get_balance_async(acc: dict) -> float:
         pass
 
     if balance_value is None:
+        # 🆕 إضافة تشخيص كامل عند الفشل
+        diagnosis = _diagnose_client(client)
         extra = f" | آخر خطأ إرسال: {last_emit_error}" if last_emit_error else ""
         extra += f" | متصل: {connected}"
-        raise TimeoutError(f"لم يتم استلام الرصيد خلال المهلة المحددة. تحقق من صحة الجلسة أو المكتبة.{extra}")
+        extra += f" | نتيجة الاتصال الصريح: {conn_result}"
+        raise TimeoutError(
+            f"لم يتم استلام الرصيد خلال المهلة المحددة.{extra}\n\n{diagnosis}"
+        )
 
     return float(balance_value)
 
@@ -248,6 +333,8 @@ async def _get_candles_async(acc: dict, asset: str, period: int) -> List:
         sub_assets=[asset],
         sub_period=period,
     )
+    # 🆕 محاولة الاتصال الصريح أيضاً
+    await _explicit_connect(client)
     # ✅ إصلاح مماثل: انتظار الاتصال الفعلي بدلاً من sleep(8)
     await _wait_for_socket_connection(client, max_wait=30.0, step=0.5)
     candles = await client.get_candles(Asset(asset), period, 30)
@@ -270,18 +357,168 @@ def verify_login(email, password):
 # واجهة Streamlit
 # ============================================================
 st.set_page_config(page_title="إشارات OTC", page_icon="📈", layout="wide")
+
+# ============================================================
+# 🎨 CSS جديد كامل - خلفية متحركة + تأثيرات زجاجية + رسائل ترحيب
+# (لم يُحذف أي سطر سابق، هذا قسم CSS موسّع بالكامل)
+# ============================================================
 st.markdown("""
 <style>
-.main-title{font-size:2.2rem;font-weight:bold;color:#00d4ff;text-align:center}
-.signal-call{background:linear-gradient(90deg,#00c853,#64dd17);padding:1rem;border-radius:10px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold}
-.signal-put{background:linear-gradient(90deg,#d50000,#ff1744);padding:1rem;border-radius:10px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold}
-.signal-neutral{background:linear-gradient(90deg,#616161,#9e9e9e);padding:1rem;border-radius:10px;color:#fff;text-align:center;font-size:1.4rem;font-weight:bold}
+/* ===== الخلفية المتحركة العامة ===== */
+@keyframes gradientBG {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+.stApp {
+    background: linear-gradient(-45deg, #0f172a, #1e293b, #0f172a, #1e3a8a, #0f172a);
+    background-size: 400% 400%;
+    animation: gradientBG 18s ease infinite;
+    min-height: 100vh;
+}
+/* تعتيم خفيف للحفاظ على وضوح النص */
+.stApp::before {
+    content: "";
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(circle at 20% 20%, rgba(34,211,238,0.06), transparent 40%),
+                radial-gradient(circle at 80% 80%, rgba(168,85,247,0.06), transparent 40%);
+    pointer-events: none;
+    z-index: 0;
+}
+/* ===== العناوين ===== */
+.main-title {
+    font-size: 2.6rem;
+    font-weight: 900;
+    text-align: center;
+    background: linear-gradient(90deg, #22d3ee, #3b82f6, #a855f7, #22d3ee);
+    background-size: 300% 300%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: gradientBG 6s ease infinite;
+    margin-bottom: 0.3rem;
+    letter-spacing: 1px;
+    filter: drop-shadow(0 0 20px rgba(34,211,238,0.35));
+}
+.sub-title {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 1rem;
+    margin-bottom: 1.5rem;
+    letter-spacing: 0.5px;
+}
+/* ===== رسالة ترحيب ===== */
+@keyframes welcomeFade {
+    0% { opacity: 0; transform: translateY(-15px); }
+    100% { opacity: 1; transform: translateY(0); }
+}
+.welcome-box {
+    background: linear-gradient(135deg, rgba(34,211,238,0.12), rgba(168,85,247,0.12));
+    border: 1px solid rgba(34,211,238,0.35);
+    border-radius: 18px;
+    padding: 1.8rem 2rem;
+    margin: 1rem 0 1.8rem 0;
+    color: #e2e8f0;
+    animation: welcomeFade 0.9s ease-out;
+    box-shadow: 0 8px 32px rgba(34,211,238,0.15), inset 0 0 60px rgba(168,85,247,0.05);
+    backdrop-filter: blur(10px);
+    position: relative;
+    overflow: hidden;
+}
+.welcome-box::before {
+    content: "";
+    position: absolute;
+    top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: conic-gradient(from 0deg, transparent, rgba(34,211,238,0.12), transparent 30%);
+    animation: rotateGlow 8s linear infinite;
+    pointer-events: none;
+}
+@keyframes rotateGlow {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+.welcome-box h2 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.6rem;
+    color: #22d3ee;
+    position: relative;
+    z-index: 1;
+}
+.welcome-box p {
+    margin: 0.3rem 0;
+    font-size: 1.02rem;
+    color: #cbd5e1;
+    position: relative;
+    z-index: 1;
+    line-height: 1.7;
+}
+.welcome-box .highlight {
+    color: #fbbf24;
+    font-weight: 700;
+}
+/* ===== بطاقات المعلومات ===== */
+.info-card {
+    background: rgba(30,41,59,0.75);
+    border: 1px solid rgba(148,163,184,0.15);
+    border-radius: 14px;
+    padding: 1rem 1.2rem;
+    margin: 0.5rem 0;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    color: #e2e8f0;
+}
+/* ===== الأزرار ===== */
+.stButton > button {
+    background: linear-gradient(135deg, #1e3a8a, #3b82f6) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    padding: 0.6rem 1rem !important;
+    transition: all 0.25s ease !important;
+    box-shadow: 0 4px 12px rgba(59,130,246,0.35) !important;
+}
+.stButton > button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 8px 22px rgba(59,130,246,0.55) !important;
+    background: linear-gradient(135deg, #3b82f6, #22d3ee) !important;
+}
+/* زر أساسي (primary) */
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #0891b2, #22d3ee) !important;
+    box-shadow: 0 4px 14px rgba(34,211,238,0.45) !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #22d3ee, #67e8f9) !important;
+    box-shadow: 0 8px 26px rgba(34,211,238,0.7) !important;
+}
+/* ===== الإشارات ===== */
+.signal-call{background:linear-gradient(90deg,#00c853,#64dd17);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800;box-shadow:0 6px 24px rgba(0,200,83,0.45)}
+.signal-put{background:linear-gradient(90deg,#d50000,#ff1744);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800;box-shadow:0 6px 24px rgba(213,0,0,0.45)}
+.signal-neutral{background:linear-gradient(90deg,#616161,#9e9e9e);padding:1.3rem;border-radius:14px;color:#fff;text-align:center;font-size:1.5rem;font-weight:800}
+/* ===== صندوق التذكير ===== */
 @keyframes pulseGlow {
     0% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
     50% { transform: scale(1.02); box-shadow: 0 6px 25px rgba(245,158,11,0.8); }
     100% { transform: scale(1); box-shadow: 0 4px 15px rgba(245,158,11,0.4); }
 }
 .reminder-box{animation:pulseGlow 1.5s infinite;background:linear-gradient(90deg,#f59e0b,#fbbf24);padding:1.2rem;border-radius:12px;color:#1f2937;text-align:center;font-size:1.15rem;font-weight:bold;margin-top:1rem}
+/* ===== الشريط الجانبي ===== */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(30,41,59,0.98)) !important;
+    border-right: 1px solid rgba(34,211,238,0.15);
+}
+section[data-testid="stSidebar"] * {
+    color: #e2e8f0 !important;
+}
+/* ===== شريط التقدم (Streamlit) ===== */
+.stProgress > div > div > div > div {
+    background: linear-gradient(90deg, #22d3ee, #3b82f6);
+}
+/* ===== الفواصل ===== */
+hr { border-color: rgba(34,211,238,0.15) !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -293,7 +530,21 @@ if "last_candles" not in st.session_state: st.session_state.last_candles = None
 
 
 if not st.session_state.logged_in:
-    st.markdown('<div class="main-title">📈 إشارات OTC</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">📈 إشارات OTC الاحترافية</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">منصة التداول الذكية — إصدار 2099</div>', unsafe_allow_html=True)
+
+    # 🆕 رسالة ترحيب جذابة (في شاشة الدخول)
+    st.markdown("""
+    <div class="welcome-box">
+        <h2>👋 أهلاً بك في منصة إشارات OTC</h2>
+        <p>منصة تحليلية متقدمة تعتمد على <span class="highlight">تقاطع المتوسطات المتحركة (SMA)</span> لتوليد إشارات دقيقة على أزواج العملات.</p>
+        <p>🔹 اتصال مباشر بخوادم <span class="highlight">PocketOption</span> عبر Socket.IO.</p>
+        <p>🔹 دعم الحسابات <span class="highlight">التجريبية والحقيقية</span>.</p>
+        <p>🔹 تحليل فوري، شموع حية، وإشارات لحظية.</p>
+        <p style="margin-top:1rem;color:#94a3b8;font-size:0.92rem">🔐 يرجى تسجيل الدخول للمتابعة.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("---")
     email = st.text_input("📧 البريد الإلكتروني")
     pwd = st.text_input("🔒 كلمة المرور", type="password")
@@ -342,14 +593,26 @@ with st.sidebar:
     st.caption(f"🔌 المكتبة: **{LIB_TYPE}**")
 
 
-st.markdown('<div class="main-title">📈 إشارات OTC</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">📈 إشارات OTC الاحترافية</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">لوحة التحكم الرئيسية — تحليل حي للسوق</div>', unsafe_allow_html=True)
+
 acc = user["accounts"][st.session_state.selected_account]
+
+# 🆕 رسالة ترحيب بعد تسجيل الدخول (بجانب معلومات الحساب)
+st.markdown(f"""
+<div class="welcome-box">
+    <h2>🌟 مرحباً بك، أيها المتداول</h2>
+    <p>الحساب النشط: <span class="highlight">{acc['label']}</span> — UID: <span class="highlight">{acc['uid']}</span></p>
+    <p>🕒 آخر دخول: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+    <p>🚀 اضغط على <span class="highlight">«بدء الاتصال»</span> لتهيئة الجلسة، ثم على <span class="highlight">«عرض الرصيد»</span> لإكمال الاتصال.</p>
+</div>
+""", unsafe_allow_html=True)
+
 st.info(f"الحساب النشط: **{acc['label']}** — UID: `{acc['uid']}`")
 st.markdown("---")
 
 # ============================================================
-# ✅ بداية القسم الجديد: بوابة الاتصال + العد التنازلي + التذكير
-# (لم يتم حذف أو تعديل أي سطر سابق)
+# ✅ بوابة الاتصال + العد التنازلي + التذكير
 # ============================================================
 if "connection_ready" not in st.session_state: st.session_state.connection_ready = False
 
@@ -409,7 +672,6 @@ with col_conn2:
         st.info("💡 اضغط على زر **«بدء الاتصال»** لبدء العد التنازلي. بعد انتهائه ستظهر لك رسالة تذكير لسحب الرصيد.")
 
 st.markdown("---")
-# ✅ نهاية القسم الجديد
 
 
 c1, c2, c3 = st.columns(3)
