@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;overflow:hidden}
+.topbar{position:fixed;top:0;left:0;right:0;height:52px;background:linear-gradient(90deg,rgba(15,23,42,0.98),rgba(30,41,59,0.98));border-bottom:1px solid rgba(34,211,238,0.25);display:flex;align-items:center;justify-content:space-between;padding:0 1rem;z-index:100}
+.topbar .brand{font-weight:800;background:linear-gradient(90deg,#22d3ee,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:1.15rem}
+.topbar .user{display:flex;align-items:center;gap:1rem;font-size:0.9rem;color:#94a3b8}
+.topbar a.logout{color:#f87171;text-decoration:none;padding:0.4rem 0.9rem;border:1px solid rgba(248,113,113,0.4);border-radius:8px;font-size:0.85rem}
+.frame-wrap{position:fixed;top:52px;left:0;right:0;bottom:0;background:#000}
+iframe{width:100%;height:100%;border:none;background:#0f172a}
+.fallback{position:absolute;inset:0;background:radial-gradient(circle at center,rgba(30,41,59,0.95),rgba(15,23,42,0.98));display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:2rem}
+.fallback h2{color:#22d3ee;font-size:1.6rem;margin-bottom:1rem}
+.fallback p{color:#94a3b8;max-width:560px;line-height:1.8;margin-bottom:1.5rem}
+.fallback .btn-big{padding:1rem 2rem;background:linear-gradient(135deg,#0891b2,#22d3ee);color:#fff;border:none;border-radius:12px;font-size:1.1rem;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}
+.fab{position:fixed;bottom:30px;left:30px;z-index:9999;display:flex;flex-direction:column;gap:10px}
+.fab-btn{padding:1rem 1.5rem;background:linear-gradient(135deg,#7c3aed,#22d3ee);color:#fff;border:none;border-radius:50px;font-size:1rem;font-weight:800;cursor:pointer;box-shadow:0 8px 30px rgba(124,58,237,0.6);animation:pulse 2s infinite}
+.fab-btn:disabled{opacity:0.7;cursor:wait;animation:none}
+@keyframes pulse{0%{box-shadow:0 8px 30px rgba(124,58,237,0.6),0 0 0 0 rgba(34,211,238,0.7)}70%{box-shadow:0 8px 30px rgba(124,58,237,0.6),0 0 0 20px rgba(34,211,238,0)}100%{box-shadow:0 8px 30px rgba(124,58,237,0.6),0 0 0 0 rgba(34,211,238,0)}}
+.settings{position:fixed;bottom:100px;left:30px;background:rgba(15,23,42,0.97);border:1px solid rgba(34,211,238,0.35);border-radius:14px;padding:1rem;min-width:240px;z-index:9998;display:none}
+.settings.show{display:block}
+.settings label{display:block;color:#94a3b8;font-size:0.8rem;margin-bottom:0.3rem;margin-top:0.7rem}
+.settings select{width:100%;padding:0.6rem;background:rgba(30,41,59,0.9);border:1px solid rgba(34,211,238,0.3);border-radius:8px;color:#e2e8f0;font-size:0.9rem}
+.settings .toggle-btn{width:100%;margin-top:1rem;padding:0.6rem;background:rgba(34,211,238,0.15);border:1px solid rgba(34,211,238,0.4);color:#22d3ee;border-radius:8px;cursor:pointer;font-weight:600}
+.signal-pop{position:fixed;top:80px;left:50%;transform:translateX(-50%) translateY(-20px);z-index:10000;min-width:320px;max-width:90vw;padding:1.4rem 2rem;border-radius:16px;text-align:center;font-size:1.3rem;font-weight:800;opacity:0;pointer-events:none;transition:all 0.35s;box-shadow:0 20px 60px rgba(0,0,0,0.7)}
+.signal-pop.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto}
+.signal-pop.CALL{background:linear-gradient(135deg,#00c853,#64dd17);color:#fff}
+.signal-pop.PUT{background:linear-gradient(135deg,#d50000,#ff1744);color:#fff}
+.signal-pop.NEUTRAL{background:linear-gradient(135deg,#616161,#9e9e9e);color:#fff}
+.signal-pop .sub{display:block;font-size:0.85rem;font-weight:500;margin-top:0.5rem;opacity:0.9}
+.signal-pop .close{position:absolute;top:8px;right:12px;background:transparent;border:none;color:#fff;font-size:1.3rem;cursor:pointer;opacity:0.7}
+.loading{position:fixed;inset:0;background:rgba(15,23,42,0.85);z-index:10001;display:none;align-items:center;justify-content:center;flex-direction:column;gap:1.2rem}
+.loading.show{display:flex}
+.spinner{width:70px;height:70px;border:5px solid rgba(34,211,238,0.2);border-top-color:#22d3ee;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading p{color:#22d3ee;font-size:1.05rem;font-weight:600}
+</style></head>
+<body>
+<div class="topbar">
+<div class="brand">OTC Signals</div>
+<div class="user"><span>{{ username }}</span><a href="/logout" class="logout">Logout</a></div>
+</div>
+<div class="frame-wrap">
+<iframe id="poFrame" src="{{ po_url }}" allow="clipboard-read;clipboard-write;fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>
+<div class="fallback" id="fb">
+<h2>PocketOption Interface</h2>
+<p>If PO doesn't show, click the button below to open it in a new tab, then return here and click "Analyze Chart".</p>
+<a class="btn-big" href="{{ po_url }}" target="_blank" rel="noopener">Open PocketOption</a>
+</div>
+</div>
+<div class="fab">
+<button class="fab-btn" id="analyzeBtn" onclick="analyzeNow()">Analyze Chart</button>
+<button class="fab-btn" style="background:linear-gradient(135deg,#334155,#475569);animation:none;font-size:0.85rem;padding:0.7rem 1.2rem" onclick="toggleSettings()">Settings</button>
+</div>
+<div class="settings" id="settings">
+<label>Asset</label>
+<select id="assetSel">{% for a in assets %}<option>{{ a }}</option>{% endfor %}</select>
+<label>Period (s)</label>
+<select id="periodSel">{% for p in periods %}<option>{{ p }}</option>{% endfor %}</select>
+<label>Account</label>
+<select id="sessionSel"><option value="demo">Demo</option><option value="real">Real</option></select>
+<button class="toggle-btn" onclick="toggleSettings()">Close</button>
+</div>
+<div class="signal-pop" id="sp">
+<button class="close" onclick="hideSignal()">x</button>
+<div id="stext">-</div>
+<span class="sub" id="ssub"></span>
+</div>
+<div class="loading" id="loading">
+<div class="spinner"></div>
+<p id="lmsg">Analyzing...</p>
+</div>
+<script>
+const loading=document.getElementById('loading'),sp=document.getElementById('sp'),
+      stext=document.getElementById('stext'),ssub=document.getElementById('ssub');
+function toggleSettings(){document.getElementById('settings').classList.toggle('show')}
+function showLoading(m){document.getElementById('lmsg').textContent=m||'Analyzing...';loading.classList.add('show')}
+function hideLoading(){loading.classList.remove('show')}
+function showSignal(sig,conf,price,reason){
+  let cls='NEUTRAL'; if(sig.indexOf('CALL')>=0)cls='CALL'; else if(sig.indexOf('PUT')>=0)cls='PUT';
+  stext.textContent=sig+' - '+conf+'%';
+  ssub.textContent=price+' | '+reason;
+  sp.className='signal-pop show '+cls;
+  clearTimeout(window._t); window._t=setTimeout(hideSignal,12000);
+}
+function hideSignal(){sp.classList.remove('show')}
+async function analyzeNow(){
+  const btn=document.getElementById('analyzeBtn'); btn.disabled=true;
+  const asset=document.getElementById('assetSel').value;
+  const period=parseInt(document.getElementById('periodSel').value);
+  const session_type=document.getElementById('sessionSel').value;
+  showLoading('Analyzing: '+asset+' / '+period+'s ...');
+  const t0=Date.now();
+  try{
+    const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({asset:asset,period:period,session_type:session_type})});
+    const d=await r.json();
+    const el=((Date.now()-t0)/1000).toFixed(1);
+    hideLoading();
+    if(d.ok) showSignal(d.signal,d.confidence,d.price,d.reason+' ('+el+'s)');
+    else showSignal('ERROR',0,'-',(d.error||'failed').slice(0,150));
+  }catch(e){hideLoading();showSignal('ERROR',0,'-','server unreachable')}
+  finally{btn.disabled=false}
+}
+</script>
+</body></html>
