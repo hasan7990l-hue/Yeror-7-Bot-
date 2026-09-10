@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-تطبيق ويب Streamlit لإشارات OTC
-- تسجيل دخول بالإيميل/كلمة المرور
-- كل حساب مرتبط بـ SESSION/UID خاص به
-- اتصال تلقائي بعد الدخول
-"""
-
 import os
 import sys
 import json
 import time
-import hashlib
 import traceback
 import asyncio
 import concurrent.futures
@@ -100,28 +92,28 @@ except Exception:
 
 
 # ============================================================
-# 👥 جدول المستخدمين — كلمة المرور الحالية: 123456
-# ============================================================
-# لتغيير كلمة المرور: عدّل قيمة "password" أدناه ثم Commit + Reboot
-#
-# لإضافة مستخدم جديد: انسخ القالب وفك التعليق
+# 👥 المستخدمون + الحسابات المتعددة
 # ============================================================
 USERS: Dict[str, Dict] = {
     "b1b2b3h45h@gmail.com": {
         "password": "123456",
-        "session": '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]',
-        "uid": 27658142,
-        "is_demo": 1,
-        "platform": 2,
+        "accounts": {
+            "demo": {
+                "label": "🟡 حساب تجريبي",
+                "session": '42["auth",{"session":"vtftn12e6f5f5008moitsd6skl","isDemo":1,"uid":27658142,"platform":2,"isFastHistory":true,"isOptimized":true}]',
+                "uid": 27658142,
+                "is_demo": 1,
+                "platform": 2,
+            },
+            "real": {
+                "label": "🟢 حساب حقيقي",
+                "session": '42["auth",{"session":"a%3A4%3A%7Bs%3A10%3A%22session_id%22%3Bs%3A32%3A%22dd9920ddafa73b322244df17e0ba2009%22%3Bs%3A10%3A%22ip_address%22%3Bs%3A11%3A%22169.224.4.6%22%3Bs%3A10%3A%22user_agent%22%3Bs%3A108%3A%22Mozilla%2F5.0%20%28Linux%3B%20Android%2013%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F120.0.0.0%20Mobile%20Safari%2F537.36%22%3Bs%3A13%3A%22last_activity%22%3Bi%3A1789007882%3B%7Decbc04e37c4181aa586dfbc8bbd9c12d","isDemo":0,"uid":101884312,"platform":1,"isFastHistory":true,"isOptimized":true}]',
+                "uid": 101884312,
+                "is_demo": 0,
+                "platform": 1,
+            },
+        },
     },
-    # ======== قالب لإضافة مستخدم آخر (اختياري) ========
-    # "user2@example.com": {
-    #     "password": "كلمة_المرور_هنا",
-    #     "session": '42["auth",{"session":"SESSION_HERE","isDemo":1,"uid":UID_HERE,"platform":2}]',
-    #     "uid": 12345678,
-    #     "is_demo": 1,
-    #     "platform": 2,
-    # },
 }
 
 
@@ -237,11 +229,10 @@ def get_candles_safe(client, symbol, timeframe, limit=30):
 
 
 def verify_login(email: str, password: str) -> Optional[dict]:
-    """يتحقق من بيانات الدخول ويُرجع بيانات المستخدم أو None."""
     email = email.strip().lower()
     for stored_email, info in USERS.items():
         if stored_email.lower() == email and info["password"] == password:
-            return {"email": stored_email, **info}
+            return {"email": stored_email, "accounts": info["accounts"]}
     return None
 
 
@@ -270,15 +261,30 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "user" not in st.session_state:
     st.session_state.user = None
+if "selected_account" not in st.session_state:
+    st.session_state.selected_account = None
+
+
+def get_active_account():
+    """يُرجع بيانات الحساب النشط حالياً (demo أو real)."""
+    if not st.session_state.user:
+        return None
+    acc_key = st.session_state.selected_account
+    if not acc_key:
+        # أول حساب افتراضياً
+        acc_key = list(st.session_state.user["accounts"].keys())[0]
+        st.session_state.selected_account = acc_key
+    return st.session_state.user["accounts"][acc_key]
 
 
 def auto_connect():
-    """يتصل تلقائياً باستخدام مفاتيح المستخدم الحالي."""
     if not st.session_state.user:
         return
-    u = st.session_state.user
-    with st.spinner("🔌 جاري الاتصال التلقائي بالمنصة..."):
-        client, ok, err, trc = connect_pocket(u["session"], int(u["uid"]), int(u["is_demo"]), int(u["platform"]))
+    acc = get_active_account()
+    if not acc:
+        return
+    with st.spinner(f"🔌 جاري الاتصال ({acc['label']})..."):
+        client, ok, err, trc = connect_pocket(acc["session"], int(acc["uid"]), int(acc["is_demo"]), int(acc["platform"]))
         if ok:
             st.session_state.client = client
             st.session_state.connected = True
@@ -307,7 +313,7 @@ if not st.session_state.logged_in:
             if user_info:
                 st.session_state.logged_in = True
                 st.session_state.user = user_info
-                # تهيئة الحالة
+                st.session_state.selected_account = list(user_info["accounts"].keys())[0]
                 st.session_state.client = None
                 st.session_state.connected = False
                 st.session_state.last_error = None
@@ -315,14 +321,13 @@ if not st.session_state.logged_in:
                 st.session_state.last_signal = None
                 st.session_state.last_candles = None
                 st.success("✅ تم الدخول. جاري الاتصال بالمنصة...")
-                # اتصال تلقائي
                 auto_connect()
                 st.rerun()
             else:
                 st.error("❌ البريد أو كلمة المرور غير صحيحة.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.caption("💡 كلمة المرور الحالية: `123456` (يمكن تغييرها من قاموس USERS في الكود).")
+    st.caption("💡 كلمة مرور التطبيق: `123456` (وليست كلمة مرور Pocket Option).")
     st.stop()
 
 
@@ -331,7 +336,6 @@ if not st.session_state.logged_in:
 # ============================================================
 user = st.session_state.user
 
-# تهيئة الحالة إذا لم تكن موجودة
 if "client" not in st.session_state:
     st.session_state.client = None
 if "connected" not in st.session_state:
@@ -351,7 +355,29 @@ if "last_candles" not in st.session_state:
 # ============================================================
 with st.sidebar:
     st.markdown(f'<div class="user-badge">👤 {user["email"]}</div>', unsafe_allow_html=True)
-    st.caption(f"🆔 UID: `{user['uid']}` | {'تجريبي' if user['is_demo'] == 1 else 'حقيقي'}")
+
+    # 🔀 اختيار الحساب (تجريبي / حقيقي)
+    acc_keys = list(user["accounts"].keys())
+    acc_labels = [user["accounts"][k]["label"] for k in acc_keys]
+
+    selected_label = st.radio(
+        "🎯 اختر الحساب:",
+        options=acc_labels,
+        index=acc_keys.index(st.session_state.selected_account) if st.session_state.selected_account in acc_keys else 0,
+        key="acc_radio"
+    )
+    # تحديد المفتاح المختار
+    new_acc_key = acc_keys[acc_labels.index(selected_label)]
+
+    # إذا تغيّر الحساب → أعد الاتصال
+    if new_acc_key != st.session_state.selected_account:
+        st.session_state.selected_account = new_acc_key
+        st.session_state.connected = False
+        st.session_state.client = None
+        st.rerun()
+
+    active_acc = user["accounts"][st.session_state.selected_account]
+    st.caption(f"🆔 UID: `{active_acc['uid']}` | {'تجريبي' if active_acc['is_demo'] == 1 else 'حقيقي'} | Platform: {active_acc['platform']}")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -362,6 +388,7 @@ with st.sidebar:
         if st.button("🚪 خروج"):
             st.session_state.logged_in = False
             st.session_state.user = None
+            st.session_state.selected_account = None
             st.session_state.client = None
             st.session_state.connected = False
             st.rerun()
@@ -380,12 +407,6 @@ with st.sidebar:
     st.markdown("---")
     st.caption(f"🔌 نوع المكتبة: **{LIB_TYPE}**")
 
-    # معلومات المفاتيح (مخفية جزئياً)
-    with st.expander("🔑 المفاتيح المرتبطة بحسابك"):
-        sess_short = user["session"][:60] + "..." if len(user["session"]) > 60 else user["session"]
-        st.code(sess_short, language="text")
-        st.text(f"UID: {user['uid']}")
-
 
 # ============================================================
 # الواجهة الرئيسية
@@ -393,7 +414,9 @@ with st.sidebar:
 st.markdown('<div class="main-title">📈 بوت إشارات OTC — نسخة الويب</div>', unsafe_allow_html=True)
 st.markdown(f"### مرحباً، `{user['email']}` 👋")
 
-# محاولة اتصال تلقائي عند أول دخول
+active_acc = user["accounts"][st.session_state.selected_account]
+st.info(f"الحساب النشط: **{active_acc['label']}** — UID: `{active_acc['uid']}`")
+
 if not st.session_state.connected and not st.session_state.last_error:
     auto_connect()
 
@@ -454,7 +477,10 @@ st.markdown("---")
 
 status_col1, status_col2, status_col3 = st.columns(3)
 with status_col1:
-    st.success("🟢 متصل بالمنصة") if st.session_state.connected else st.error("🔴 غير متصل")
+    if st.session_state.connected:
+        st.success("🟢 متصل بالمنصة")
+    else:
+        st.error("🔴 غير متصل")
 with status_col2:
     st.info(f"📊 العملة: **{symbol_input}**")
 with status_col3:
