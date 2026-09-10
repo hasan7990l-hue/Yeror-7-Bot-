@@ -13,8 +13,42 @@ import sys
 import json
 import time
 import traceback
+import asyncio
+import threading
 from datetime import datetime
 from typing import Dict, List
+
+# ============================================================
+# 🔧 ترقيع asyncio BEFORE أي استيراد آخر
+# يضمن وجود event loop في خيط Streamlit
+# ============================================================
+try:
+    _original_get_event_loop = asyncio.get_event_loop
+
+    def _patched_get_event_loop():
+        try:
+            return _original_get_event_loop()
+        except RuntimeError:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                return loop
+            except Exception:
+                return asyncio.new_event_loop()
+
+    asyncio.get_event_loop = _patched_get_event_loop
+except Exception:
+    pass
+
+# ضمان وجود loop الآن أيضاً
+try:
+    asyncio.get_event_loop()
+except Exception:
+    try:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    except Exception:
+        pass
+# ============================================================
 
 import streamlit as st
 
@@ -25,7 +59,6 @@ os.environ["HOME"] = TMP_DIR
 os.environ["TMPDIR"] = TMP_DIR
 os.environ.setdefault("POCKETOPTION_HISTORY_PATH", TMP_DIR)
 
-# --- حل مشكلة global_value.py ---
 try:
     os.chdir(TMP_DIR)
 except Exception:
@@ -63,7 +96,6 @@ except Exception:
     except Exception:
         LIB_TYPE = "none"
 
-# --- إعادة os.makedirs الأصلي ---
 try:
     os.makedirs = _original_makedirs
 except Exception:
@@ -105,18 +137,36 @@ def generate_signal(candles, short_period: int = 5, long_period: int = 20) -> Di
     return {"signal": "NEUTRAL ⚪", "confidence": 50.0, "price": current_price, "reason": "لا يوجد تقاطع واضح"}
 
 
+def _ensure_event_loop():
+    """تأكيد وجود event loop في الخيط الحالي قبل أي عملية."""
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        except Exception:
+            pass
+
+
 def connect_pocket(session: str, uid: int, is_demo: int, platform: int):
     """يُرجع (client, connected, error_msg, error_trace)"""
     if LIB_TYPE == "none":
         return None, False, "لم يتم العثور على أي مكتبة PocketOption مثبتة.", "LIB_TYPE = none"
 
+    # 🔧 ضمان وجود event loop قبل إنشاء الكائن
+    _ensure_event_loop()
+
     try:
         if LIB_TYPE == "pocketoptionapi":
+            # بعض الإصدارات تتطلب event loop جديد لكل اتصال
+            _ensure_event_loop()
             client = PocketOption(ssid=session, demo=bool(is_demo))
             client.connect()
             return client, True, None, None
 
         elif LIB_TYPE == "pocketoptionapi2":
+            _ensure_event_loop()
             client = PocketOption(demo=bool(is_demo))
             try:
                 client.connect(session=session, uid=uid, isDemo=is_demo, platform=platform)
@@ -126,6 +176,7 @@ def connect_pocket(session: str, uid: int, is_demo: int, platform: int):
             return client, True, None, None
 
         else:
+            _ensure_event_loop()
             client = PocketOption(demo=bool(is_demo))
             try:
                 client.set_session(session, uid, is_demo, platform)
@@ -139,6 +190,7 @@ def connect_pocket(session: str, uid: int, is_demo: int, platform: int):
 
 
 def get_balance_safe(client):
+    _ensure_event_loop()
     try:
         if hasattr(client, "get_balance"):
             return client.get_balance()
@@ -150,6 +202,7 @@ def get_balance_safe(client):
 
 
 def get_candles_safe(client, symbol, timeframe, limit=30):
+    _ensure_event_loop()
     try:
         if hasattr(client, "get_candles"):
             return client.get_candles(symbol, timeframe, limit)
@@ -356,7 +409,6 @@ if st.session_state.last_candles:
         m3.metric("SMA(20)", f"{sma20:.5f}")
         m4.metric("عدد الشموع", len(candles))
 
-        # جدول
         rows = []
         for c in candles[-10:]:
             try:
@@ -373,7 +425,6 @@ if st.session_state.last_candles:
 
         st.dataframe(rows, use_container_width=True)
 
-        # رسم بياني
         try:
             import pandas as pd
             chart_data = pd.DataFrame({"الإغلاق": closes[-30:]})
