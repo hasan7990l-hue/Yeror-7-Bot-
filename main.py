@@ -20,20 +20,17 @@ os.environ["TMPDIR"] = TMP_DIR
 os.environ.setdefault("POCKETOPTION_HISTORY_PATH", TMP_DIR)
 
 # ========== الإضافة الجديدة #1: حل مشكلة global_value.py (os.makedirs) ==========
-# 1) تغيير مجلد العمل الحالي إلى مجلد قابل للكتابة قبل استيراد المكتبة
 try:
     os.chdir(TMP_DIR)
 except Exception as _chdir_err:
     print(f"Warning: could not chdir to {TMP_DIR}: {_chdir_err}")
 
-# 2) إنشاء المجلدات التي تحاول مكتبة pocketoptionapi إنشاءها مسبقاً
 for _sub in ["history", "history/data", "logs", "cache", "data"]:
     try:
         os.makedirs(os.path.join(TMP_DIR, _sub), exist_ok=True)
     except Exception:
         pass
 
-# 3) إنشاء نسخة من نفس المجلدات في مكان الاستيراد الافتراضي أيضاً
 try:
     _site_pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for _sub in ["history", "logs"]:
@@ -44,43 +41,55 @@ try:
 except Exception:
     pass
 
-# 4) ضبط متغيرات بيئة إضافية قد تستخدمها المكتبة
 os.environ.setdefault("POCKETOPTION_DATA_DIR", TMP_DIR)
 os.environ.setdefault("POCKETOPTION_LOGS_DIR", os.path.join(TMP_DIR, "logs"))
 os.environ.setdefault("POCKETOPTION_CACHE_DIR", os.path.join(TMP_DIR, "cache"))
 # ========== نهاية الإضافة #1 ==========
 
-# --- إضافة سيرفر خفيف للرد على الاستضافات لمنع إغلاق السيرفر (Health Check) ---
-from flask import Flask
+# ========== التعديل الجذري: سيرفر الصحة الآن في عملية منفصلة (multiprocessing) ==========
+# هذا يمنع Flask من حجب البوت داخل Streamlit.
+def _health_worker(port: int):
+    """يعمل في عملية منفصلة تماماً — لا يحجب البوت."""
+    try:
+        from flask import Flask
+        _app = Flask("health")
 
-health_app = Flask(__name__)
+        @_app.route("/")
+        def _hc():
+            return "Bot is alive and running!", 200
 
-
-@health_app.route("/")
-def health_check():
-    return "Bot is alive and running!", 200
+        _app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    except Exception as _e:
+        print(f"[Health Worker] error: {_e}")
 
 
 def run_health_server():
+    """تشغيل سيرفر الصحة في عملية منفصلة. إذا فشل، يكمل البوت عمله."""
     port = int(os.environ.get("PORT", 8080))
     try:
-        health_app.run(host="0.0.0.0", port=port)
+        import multiprocessing
+        # استخدام spawn لتفادي مشاكل fork مع asyncio/telegram
+        try:
+            ctx = multiprocessing.get_context("spawn")
+        except Exception:
+            ctx = multiprocessing
+        p = ctx.Process(target=_health_worker, args=(port,), daemon=True)
+        p.start()
+        print(f"ℹ️ Health server started in separate process (PID: {p.pid}) on port {port}")
     except Exception as e:
-        print(f"Health server error: {e}")
-
+        # في حال فشل multiprocessing، نكتفي بتعطيل سيرفر الصحة بدل تعطيل البوت
+        print(f"⚠️ Could not start health server (continuing without it): {e}")
+# ========== نهاية التعديل الجذري ==========
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ========== الإضافة الجديدة #2: ترقيع آمن قبل استيراد المكتبة ==========
-# بعض إصدارات pocketoptionapi تستورد global_value مباشرة عند الاستيراد،
-# و global_value يحاول إنشاء مجلد. نقوم بحقن مسار آمن.
 _original_makedirs = os.makedirs
 def _safe_makedirs(name, mode=0o777, exist_ok=False):
     try:
         return _original_makedirs(name, mode, exist_ok)
     except (PermissionError, FileExistsError, OSError):
-        # إذا فشل في المسار الأصلي، حوله إلى TMP_DIR
         try:
             safe_name = os.path.join(TMP_DIR, os.path.basename(name))
             return _original_makedirs(safe_name, mode, exist_ok=True)
@@ -105,8 +114,7 @@ except Exception:
         except Exception:
             LIB_TYPE = "none"
 
-# ========== الإضافة الجديدة #3: إعادة os.makedirs الأصلي بعد نجاح الاستيراد ==========
-# (لا نريد تعطيل الدالة الأصلية للأبد حتى لا نكسر باقي الكود)
+# ========== الإضافة الجديدة #3: إعادة os.makedirs الأصلي ==========
 try:
     os.makedirs = _original_makedirs
 except Exception:
@@ -190,7 +198,6 @@ class SignalPublisher:
         self.last_error = None
         self.last_error_trace = None
 
-    # ========== التعديل الحصري هنا (دالة connect) ==========
     def connect(self) -> bool:
         self.last_error = None
         self.last_error_trace = None
@@ -202,31 +209,26 @@ class SignalPublisher:
             return False
 
         try:
-            # --- المحاولة الأولى: باستخدام التوقيع الشائع لمكتبة pocketoptionapi (القديمة) ---
             if LIB_TYPE == "pocketoptionapi":
                 self.client = PocketOption(ssid=SESSION, demo=True)
                 self.client.connect()
                 self.connected = True
                 return True
 
-            # --- المحاولة الثانية: باستخدام pocketoptionapi2 (الجديدة) ---
             elif LIB_TYPE == "pocketoptionapi2":
                 self.client = PocketOption(demo=True)
                 self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
                 self.connected = True
                 return True
 
-            # --- المحاولة الثالثة: طريقة set_session إذا فشلت السابقتان ---
             else:
                 self.client = PocketOption(demo=True)
                 try:
-                    # بعض الإصدارات تحتاج إلى set_session أولاً
                     self.client.set_session(SESSION, UID, IS_DEMO, PLATFORM)
                     self.client.connect()
                     self.connected = True
                     return True
                 except Exception:
-                    # محاولة بالتمرير المباشر
                     self.client.connect(session=SESSION, uid=UID, isDemo=IS_DEMO, platform=PLATFORM)
                     self.connected = True
                     return True
@@ -236,7 +238,6 @@ class SignalPublisher:
             self.last_error_trace = traceback.format_exc()
             self.connected = False
             return False
-    # ========== نهاية التعديل ==========
 
     def get_candles(self, symbol: str, timeframe: int = 60, limit: int = 30) -> List:
         if not self.connected or not self.client:
@@ -308,7 +309,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💰 الرصيد", callback_data="balance")],
         [InlineKeyboardButton("📊 اختيار العملة", callback_data="select_symbol")],
         [InlineKeyboardButton(f"📈 إشارة فورية ({symbol})", callback_data="signal_now")],
-        # ✅ السطر الجديد المضاف (زر عرض آخر بيانات السوق)
         [InlineKeyboardButton("📊 آخر بيانات السوق", callback_data="last_data")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -423,13 +423,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML"
                 )
 
-    # ✅ البدء: قسم "آخر بيانات السوق" الجديد (لم يتم حذف أو تعديل أي سطر سابق)
     elif data == "last_data":
-        # محاولة اتصال تلقائي إذا كان غير متصل
         if not publisher.connected:
             await publisher.async_connect()
         
-        # جلب آخر 30 شمعة
         candles = publisher.get_candles(publisher.selected_symbol, publisher.selected_timeframe, 30)
         if not candles:
             await query.edit_message_text(
@@ -439,7 +436,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # حساب المؤشرات وعرض التفاصيل
         closes = [c[4] for c in candles]
         current_price = closes[-1]
         sma5 = sum(closes[-5:]) / 5
@@ -462,7 +458,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for idx, c in enumerate(candles[-5:], 1):
             try:
-                # c[0] = timestamp, c[1]=فتح, c[2]=أعلى, c[3]=أدنى, c[4]=إغلاق
                 dt = datetime.fromtimestamp(c[0]).strftime("%H:%M:%S")
                 msg += (
                     f"  {idx}⟩ {dt} | فتح: {c[1]:.5f} | أعلى: {c[2]:.5f} | "
@@ -472,9 +467,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += f"  {idx}⟩ {c}\n"
         
         await query.edit_message_text(msg, parse_mode="HTML")
-    # ✅ نهاية القسم الجديد
 
-# ========== الأمر الجديد المضافة (/test) بدون حذف أي شيء ==========
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 جاري اختبار الاتصال بالمنصة...")
     success = await publisher.async_connect()
@@ -497,7 +490,6 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- الحساب: {'تجريبي' if IS_DEMO == 1 else 'حقيقي'}"
         )
         await update.message.reply_text(full_report, parse_mode="HTML")
-# ========== نهاية الإضافة ==========
 
 # ---- آلية القفل ----
 LOCK_FILE = "/tmp/bot.lock"
@@ -507,22 +499,19 @@ def main():
         print("⚠️ يوجد نسخة أخرى من البوت تعمل، إنهاء هذه النسخة.")
         return
 
-    # تشغيل سيرفر الصحة بالخلفية لإبقاء منفذ الاستضافة نشطاً
-    threading.Thread(target=run_health_server, daemon=True).start()
+    # تشغيل سيرفر الصحة في عملية منفصلة (لن يحجب البوت)
+    run_health_server()
 
     with open(LOCK_FILE, "w") as f:
         f.write(str(os.getpid()))
 
     try:
-        # ======== التعديل الوحيد (إضافة مهلة اتصال وقراءة 30 ثانية) ========
         app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
-        # ===================================================================
         app.add_handler(CommandHandler("start", start_command))
-        # ========== تسجيل الأمر الجديد /test ==========
         app.add_handler(CommandHandler("test", test_command))
-        # ==============================================
         app.add_handler(CallbackQueryHandler(button_handler))
         print("🤖 البوت يعمل الآن... (مع التصحيح النهائي للمكتبة وأمر /test وتحديد مهلة 30 ثانية)")
+        print("🚀 جاهز لتشغيل run_polling...")
         app.run_polling(stop_signals=None)
     finally:
         if os.path.exists(LOCK_FILE):
